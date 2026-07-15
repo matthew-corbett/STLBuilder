@@ -57,18 +57,29 @@ Distribute either the whole `dist\STLBuilder` folder (portable) or the `STLBuild
 ### Text stamp
 
 1. Choose **text** mode and enter your stamp text (use **Enter** for a second line).
-2. Pick a **font** and adjust **font size**, **imprint depth**, **base thickness**, and **margin**.
-3. Leave **Mirror design** enabled so the stamped leather reads normally.
-4. Click **Update Preview**, then **Export STL…**.
+2. Pick **horizontal** or **vertical** text direction (vertical stacks each letter top-to-bottom).
+3. Pick a **font** and adjust **font size**, **imprint depth**, **base thickness**, and **margin**.
+4. Leave **Mirror design** enabled so the stamped leather reads normally.
+5. Click **Update Preview**, then **Export STL…**.
 
 ### Image stamp
 
 1. Choose **image** mode and click **Import image…** (PNG, JPG, BMP, GIF, or WebP).
-2. Adjust **stamp width**, **threshold**, and **edge simplify** until the mask preview looks right.
+2. Adjust **stamp width**, **threshold**, and **edge simplify (%)** until the 3D preview looks right. Use a low simplify value (around 0.15%) for fine detail like small stars or text.
 3. Use **Invert** if you need light areas raised instead of dark (e.g. white logo on black).
 4. Set **imprint depth**, **base**, and **margin**, then preview and export.
 
 Print with the **raised design facing up**. The flat back of the base sits on your press or mallet.
+
+### Drafts
+
+Use **Save Draft…** / **Open Draft…** to store a `.stldraft` package with:
+
+- All stamp settings (text or image mode)
+- The current preview STL (if generated)
+- The source image and/or custom `.ttf` (embedded so the draft travels with its assets)
+
+Reopen a draft later to restore settings and the 3D preview without rebuilding from scratch.
 
 ## Tips for leather stamping
 
@@ -86,6 +97,7 @@ STLBuilder/
 └── stlbuilder/
     ├── stamp_generator.py  # Text geometry + STL export
     ├── image_stamp.py      # Image silhouette → STL
+    ├── draft.py            # .stldraft save/load
     ├── geometry_utils.py   # Shared base plate helpers
     ├── fonts.py            # System font listing
     └── gui/

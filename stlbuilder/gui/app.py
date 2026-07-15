@@ -8,10 +8,12 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 import numpy as np
+import trimesh
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from PIL import Image, ImageOps
 
+from stlbuilder.draft import collect_settings_dict, load_draft, save_draft
 from stlbuilder.fonts import FontOption, list_system_fonts
 from stlbuilder.image_stamp import ImageStampSettings, build_image_stamp, preview_image_mask
 from stlbuilder.stamp_generator import (
@@ -41,6 +43,7 @@ class StampDesignerApp(ctk.CTk):
         self._mode = ctk.StringVar(value="text")
         self._model = None
         self._busy = False
+        self._draft_workspace = None
 
         self._build_layout()
         self._on_mode_changed("text")
@@ -72,17 +75,27 @@ class StampDesignerApp(ctk.CTk):
 
         btn_row = ctk.CTkFrame(preview_frame, fg_color="transparent")
         btn_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
-        btn_row.grid_columnconfigure((0, 1), weight=1)
+        btn_row.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
         self._preview_btn = ctk.CTkButton(
             btn_row, text="Update Preview", command=self._on_preview
         )
-        self._preview_btn.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        self._preview_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
         self._export_btn = ctk.CTkButton(
             btn_row, text="Export STL…", command=self._on_export, fg_color="#2d6a4f"
         )
-        self._export_btn.grid(row=0, column=1, padx=(6, 0), sticky="ew")
+        self._export_btn.grid(row=0, column=1, padx=4, sticky="ew")
+
+        self._save_draft_btn = ctk.CTkButton(
+            btn_row, text="Save Draft…", command=self._on_save_draft
+        )
+        self._save_draft_btn.grid(row=0, column=2, padx=4, sticky="ew")
+
+        self._open_draft_btn = ctk.CTkButton(
+            btn_row, text="Open Draft…", command=self._on_open_draft
+        )
+        self._open_draft_btn.grid(row=0, column=3, padx=(4, 0), sticky="ew")
 
         self._status = ctk.CTkLabel(self, text="", anchor="w")
         self._status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 10))
@@ -152,6 +165,26 @@ class StampDesignerApp(ctk.CTk):
         self._custom_font_label.grid(row=text_row, column=0, sticky="w")
         text_row += 1
 
+        ctk.CTkLabel(self._text_frame, text="Text direction").grid(
+            row=text_row, column=0, sticky="w", pady=(8, 0)
+        )
+        text_row += 1
+        self._orientation = ctk.StringVar(value="horizontal")
+        ctk.CTkSegmentedButton(
+            self._text_frame,
+            values=["horizontal", "vertical"],
+            variable=self._orientation,
+        ).grid(row=text_row, column=0, sticky="ew", pady=4)
+        text_row += 1
+
+        ctk.CTkLabel(
+            self._text_frame,
+            text="Vertical stacks each letter top-to-bottom.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        ).grid(row=text_row, column=0, sticky="w")
+        text_row += 1
+
         self._font_size = self._labeled_slider(
             self._text_frame, text_row, "Font size (mm)", 6, 40, 12
         )
@@ -202,7 +235,7 @@ class StampDesignerApp(ctk.CTk):
         image_row += 1
 
         self._simplify = self._labeled_slider(
-            self._image_frame, image_row, "Edge simplify", 0.2, 3.0, 0.8, resolution=0.1
+            self._image_frame, image_row, "Edge simplify (%)", 0.05, 2.0, 0.15, resolution=0.05
         )
         image_row += 1
 
@@ -325,12 +358,27 @@ class StampDesignerApp(ctk.CTk):
             command=on_change,
         )
         slider.set(default)
+        on_change(default)
         slider.grid(row=1, column=0, columnspan=3, sticky="ew", pady=4)
         slider.value_var = value_var  # type: ignore[attr-defined]
+        slider._fmt_resolution = resolution  # type: ignore[attr-defined]
         return slider
 
     def _slider_value(self, slider: ctk.CTkSlider) -> float:
         return float(slider.get())
+
+    def _set_slider(self, slider: ctk.CTkSlider, value: float) -> None:
+        low = float(slider.cget("from_"))
+        high = float(slider.cget("to"))
+        clamped = max(low, min(high, float(value)))
+        slider.set(clamped)
+        resolution = getattr(slider, "_fmt_resolution", 1.0)
+        value_var = getattr(slider, "value_var", None)
+        if value_var is not None:
+            if resolution < 1:
+                value_var.set(f"{clamped:.1f}")
+            else:
+                value_var.set(f"{int(round(clamped))}")
 
     def _collect_text_settings(self) -> StampSettings:
         text = self._text.get("1.0", "end").strip()
@@ -347,6 +395,7 @@ class StampDesignerApp(ctk.CTk):
             base_thickness=self._slider_value(self._base_thickness),
             margin=self._slider_value(self._margin),
             mirror_for_leather=self._mirror_var.get(),
+            orientation=self._orientation.get(),
         )
 
     def _collect_image_settings(self) -> ImageStampSettings:
@@ -422,6 +471,8 @@ class StampDesignerApp(ctk.CTk):
         state = "disabled" if busy else "normal"
         self._preview_btn.configure(state=state)
         self._export_btn.configure(state=state)
+        self._save_draft_btn.configure(state=state)
+        self._open_draft_btn.configure(state=state)
 
     def _set_status(self, msg: str) -> None:
         self._status.configure(text=msg)
@@ -449,6 +500,251 @@ class StampDesignerApp(ctk.CTk):
         if not path:
             return
         self._run_generation(preview_only=False, export_path=path)
+
+    def _snapshot_ui_settings(self) -> dict:
+        return collect_settings_dict(
+            mode=self._mode.get(),
+            text=self._text.get("1.0", "end").strip(),
+            font_family=self._font_var.get(),
+            custom_font_path=self._custom_font_path,
+            font_size=self._slider_value(self._font_size),
+            imprint_depth=self._slider_value(self._imprint_depth),
+            base_thickness=self._slider_value(self._base_thickness),
+            margin=self._slider_value(self._margin),
+            mirror_for_leather=self._mirror_var.get(),
+            image_path=self._image_path,
+            width_mm=self._slider_value(self._stamp_width),
+            threshold=int(round(self._slider_value(self._threshold))),
+            invert=self._invert_var.get(),
+            simplify=self._slider_value(self._simplify),
+            orientation=self._orientation.get(),
+        )
+
+    def _on_save_draft(self) -> None:
+        if self._busy:
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Save stamp draft",
+            defaultextension=".stldraft",
+            filetypes=[("STL Builder draft", "*.stldraft")],
+            initialfile="stamp_draft.stldraft",
+        )
+        if not path:
+            return
+
+        settings = self._snapshot_ui_settings()
+        image_path = self._image_path
+        custom_font_path = self._custom_font_path
+        model = self._model
+
+        if model is None:
+            regenerate = messagebox.askyesno(
+                "No preview yet",
+                "No STL is generated yet. Build one and include it in the draft?",
+            )
+            if not regenerate:
+                try:
+                    save_draft(
+                        path,
+                        settings,
+                        model=None,
+                        image_path=image_path,
+                        custom_font_path=custom_font_path,
+                    )
+                except Exception as exc:
+                    messagebox.showerror("Save failed", str(exc))
+                    return
+                self._set_status(f"Draft saved (settings only): {path}")
+                return
+
+            self._set_busy(True)
+            self._set_status("Generating geometry for draft…")
+
+            def work_build_then_save() -> None:
+                try:
+                    if self._mode.get() == "image":
+                        built = build_image_stamp(self._collect_image_settings())
+                    else:
+                        built = build_stamp(self._collect_text_settings())
+                    out = save_draft(
+                        path,
+                        settings,
+                        model=built,
+                        image_path=image_path,
+                        custom_font_path=custom_font_path,
+                    )
+                    self.after(0, lambda: self._on_draft_saved(built, str(out)))
+                except StampGenerationError as exc:
+                    self.after(0, lambda: self._on_error(str(exc)))
+                except Exception as exc:
+                    self.after(0, lambda: self._on_error(f"Could not save draft: {exc}"))
+
+            threading.Thread(target=work_build_then_save, daemon=True).start()
+            return
+
+        self._set_busy(True)
+        self._set_status("Saving draft…")
+
+        def work_save() -> None:
+            try:
+                out = save_draft(
+                    path,
+                    settings,
+                    model=model,
+                    image_path=image_path,
+                    custom_font_path=custom_font_path,
+                )
+                self.after(0, lambda: self._on_draft_saved(model, str(out)))
+            except Exception as exc:
+                self.after(0, lambda: self._on_error(f"Could not save draft: {exc}"))
+
+        threading.Thread(target=work_save, daemon=True).start()
+
+    def _on_draft_saved(self, model, path: str) -> None:
+        self._model = model
+        if hasattr(model, "vertices"):
+            self._update_preview_from_mesh(model)
+        else:
+            self._update_preview_plot(model)
+        self._set_busy(False)
+        self._set_status(f"Draft saved: {path}")
+
+    def _on_open_draft(self) -> None:
+        if self._busy:
+            return
+
+        path = filedialog.askopenfilename(
+            title="Open stamp draft",
+            filetypes=[("STL Builder draft", "*.stldraft"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            draft = load_draft(path)
+        except StampGenerationError as exc:
+            messagebox.showerror("Open failed", str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("Open failed", f"Could not open draft:\n{exc}")
+            return
+
+        # Keep extracted assets alive for this session.
+        self._draft_workspace = draft._workspace
+        self._apply_draft(draft)
+        self._set_status(f"Draft opened: {path}")
+
+    def _apply_draft(self, draft) -> None:
+        data = draft.settings
+        shared = data.get("shared") or {}
+        text = data.get("text") or {}
+        image = data.get("image") or {}
+
+        self._set_slider(self._imprint_depth, shared.get("imprint_depth", 2.0))
+        self._set_slider(self._base_thickness, shared.get("base_thickness", 5.0))
+        self._set_slider(self._margin, shared.get("margin", 4.0))
+        self._mirror_var.set(bool(shared.get("mirror_for_leather", True)))
+
+        self._text.delete("1.0", "end")
+        self._text.insert("1.0", text.get("text") or "")
+
+        if draft.custom_font_path is not None:
+            self._custom_font_path = str(draft.custom_font_path)
+            self._custom_font_label.configure(
+                text=f"Custom: {draft.custom_font_path.name}",
+                text_color=("gray10", "gray90"),
+            )
+        else:
+            self._custom_font_path = None
+            self._custom_font_label.configure(
+                text="No custom font loaded", text_color="gray"
+            )
+            family = text.get("font_family") or "Arial"
+            font_names = [f.display_name for f in self._fonts]
+            if family in font_names:
+                self._font_var.set(family)
+
+        self._set_slider(self._font_size, text.get("font_size", 12.0))
+        orientation = text.get("orientation", "horizontal")
+        if orientation not in ("horizontal", "vertical"):
+            orientation = "horizontal"
+        self._orientation.set(orientation)
+        self._set_slider(self._stamp_width, image.get("width_mm", 40.0))
+        self._set_slider(self._threshold, image.get("threshold", 128))
+        self._set_slider(self._simplify, image.get("simplify", 0.15))
+        self._invert_var.set(bool(image.get("invert", False)))
+
+        if draft.image_path is not None:
+            self._image_path = str(draft.image_path)
+            display_name = image.get("original_image_name") or draft.image_path.name
+            self._image_name_label.configure(
+                text=display_name, text_color=("gray10", "gray90")
+            )
+        else:
+            self._image_path = None
+            self._image_name_label.configure(text="No image loaded", text_color="gray")
+            self._image_preview_label.configure(image=None, text="Mask preview")
+            self._image_preview_ref = None
+
+        mode = draft.mode
+        if mode == "image" and not self._image_path:
+            mode = "text"
+        self._mode.set(mode)
+        self._on_mode_changed(mode)
+
+        if draft.stl_path is not None:
+            try:
+                mesh = trimesh.load(str(draft.stl_path), force="mesh")
+                self._model = mesh
+                self._update_preview_from_mesh(mesh)
+            except Exception:
+                self._model = None
+                self._set_status("Draft settings loaded; STL preview unavailable.")
+        else:
+            self._model = None
+
+    def _update_preview_from_mesh(self, mesh) -> None:
+        verts = np.asarray(mesh.vertices)
+        faces = np.asarray(mesh.faces)
+        if verts.size == 0 or faces.size == 0:
+            self._set_status("Preview unavailable; mesh has no geometry.")
+            return
+
+        self._ax.clear()
+        self._ax.plot_trisurf(
+            verts[:, 0],
+            verts[:, 1],
+            verts[:, 2],
+            triangles=faces,
+            color="#4a90d9",
+            edgecolor="#1a3a5c",
+            linewidth=0.08,
+            alpha=0.92,
+        )
+        self._ax.set_xlabel("X (mm)")
+        self._ax.set_ylabel("Y (mm)")
+        self._ax.set_zlabel("Z (mm)")
+        self._ax.set_title("Stamp (top = raised design)")
+
+        # Match real mm proportions (matplotlib 3D otherwise stretches each axis
+        # to a cube, which makes a thin base look much larger than the STL).
+        extents = np.ptp(verts, axis=0)
+        extents = np.where(extents < 1e-9, 1.0, extents)
+        self._ax.set_box_aspect(extents)
+
+        mins = verts.min(axis=0)
+        maxs = verts.max(axis=0)
+        pad = 0.02 * extents
+        self._ax.set_xlim(mins[0] - pad[0], maxs[0] + pad[0])
+        self._ax.set_ylim(mins[1] - pad[1], maxs[1] + pad[1])
+        self._ax.set_zlim(mins[2] - pad[2], maxs[2] + pad[2])
+
+        self._azim = getattr(self, "_azim", 45)
+        self._elev = getattr(self, "_elev", 28)
+        self._ax.view_init(elev=self._elev, azim=self._azim)
+        self._fig.tight_layout()
+        self._canvas.draw_idle()
 
     def _run_generation(self, preview_only: bool, export_path: str | None = None) -> None:
         try:
@@ -485,7 +781,6 @@ class StampDesignerApp(ctk.CTk):
         self._set_busy(False)
         if export_path:
             self._set_status(f"Exported: {export_path}")
-            messagebox.showinfo("Export complete", f"STL saved to:\n{export_path}")
         elif preview_only:
             self._set_status("Preview updated.")
 
@@ -497,37 +792,10 @@ class StampDesignerApp(ctk.CTk):
     def _update_preview_plot(self, model) -> None:
         try:
             mesh = model_to_trimesh(model)
-            verts = np.asarray(mesh.vertices)
-            faces = np.asarray(mesh.faces)
         except Exception:
             self._set_status("Preview unavailable; export may still work.")
             return
-
-        self._ax.clear()
-        self._ax.plot_trisurf(
-            verts[:, 0],
-            verts[:, 1],
-            verts[:, 2],
-            triangles=faces,
-            color="#4a90d9",
-            edgecolor="#1a3a5c",
-            linewidth=0.08,
-            alpha=0.92,
-        )
-        self._ax.set_xlabel("X (mm)")
-        self._ax.set_ylabel("Y (mm)")
-        self._ax.set_zlabel("Z (mm)")
-        self._ax.set_title("Stamp (top = raised design)")
-
-        max_range = np.ptp(verts, axis=0).max() / 2
-        mid = verts.mean(axis=0)
-        self._ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
-        self._ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
-        self._azim = getattr(self, "_azim", 45)
-        self._elev = getattr(self, "_elev", 28)
-        self._ax.view_init(elev=self._elev, azim=self._azim)
-        self._fig.tight_layout()
-        self._canvas.draw_idle()
+        self._update_preview_from_mesh(mesh)
 
 
 def run_app() -> None:

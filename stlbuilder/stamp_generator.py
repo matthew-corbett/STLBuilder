@@ -21,6 +21,7 @@ class StampSettings:
     base_thickness: float = 5.0
     margin: float = 4.0
     mirror_for_leather: bool = True
+    orientation: str = "horizontal"  # "horizontal" | "vertical"
     # Stamp face at Z=0; letters extrude +Z; base extends -Z
 
 
@@ -28,9 +29,42 @@ class StampGenerationError(Exception):
     pass
 
 
+def layout_text(text: str, orientation: str = "horizontal") -> str:
+    """Prepare stamp text for CadQuery rendering.
+
+    Horizontal: keep newlines as typed.
+    Vertical: stack each character top-to-bottom (word spaces become a blank gap).
+    """
+    cleaned = text.strip("\n")
+    if orientation != "vertical":
+        return cleaned
+
+    blocks: list[str] = []
+    for line in cleaned.splitlines():
+        stacked: list[str] = []
+        for ch in line:
+            if ch.isspace():
+                if stacked and stacked[-1] != "":
+                    stacked.append("")
+            else:
+                stacked.append(ch)
+        while stacked and stacked[-1] == "":
+            stacked.pop()
+        if stacked:
+            blocks.append("\n".join(stacked))
+        elif blocks:
+            blocks.append("")
+
+    while blocks and blocks[-1] == "":
+        blocks.pop()
+    return "\n\n".join(blocks)
+
+
 def _validate_settings(settings: StampSettings) -> None:
     if not settings.text.strip():
         raise StampGenerationError("Enter some text for the stamp.")
+    if settings.orientation not in ("horizontal", "vertical"):
+        raise StampGenerationError("Orientation must be horizontal or vertical.")
     if settings.font_size <= 0:
         raise StampGenerationError("Font size must be greater than zero.")
     if settings.imprint_depth <= 0:
@@ -46,6 +80,9 @@ def build_stamp(settings: StampSettings) -> cq.Workplane:
     _validate_settings(settings)
 
     family, font_path = resolve_font(settings.font_family, settings.font_path)
+    rendered_text = layout_text(settings.text, settings.orientation)
+    if not rendered_text.strip():
+        raise StampGenerationError("Enter some text for the stamp.")
 
     kwargs: dict = {
         "fontsize": settings.font_size,
@@ -59,7 +96,7 @@ def build_stamp(settings: StampSettings) -> cq.Workplane:
         kwargs["fontPath"] = font_path
 
     try:
-        text_wp = cq.Workplane("XY").text(settings.text, **kwargs)
+        text_wp = cq.Workplane("XY").text(rendered_text, **kwargs)
     except Exception as exc:
         raise StampGenerationError(
             f"Could not render text with font '{family}'. Try another font."
@@ -100,6 +137,9 @@ def model_to_trimesh(model: cq.Workplane):
         tmp_path = tmp.name
     try:
         cq.exporters.export(model, tmp_path)
-        return trimesh.load(tmp_path)
+        mesh = trimesh.load(tmp_path, force="mesh")
+        if isinstance(mesh, trimesh.Scene):
+            mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
+        return mesh
     finally:
         Path(tmp_path).unlink(missing_ok=True)

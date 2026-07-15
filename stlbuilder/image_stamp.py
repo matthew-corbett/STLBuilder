@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 from PIL import Image
 from shapely.geometry import Polygon
-from shapely.validation import make_valid
 
 from stlbuilder.geometry_utils import apply_mirror, build_base_plate
 from stlbuilder.stamp_generator import StampGenerationError
@@ -26,8 +25,8 @@ class ImageStampSettings:
     mirror_for_leather: bool = True
     threshold: int = 128
     invert: bool = False
-    simplify: float = 0.8
-    max_pixels: int = 400
+    simplify: float = 0.15
+    max_pixels: int = 1000
 
 
 def _validate_settings(settings: ImageStampSettings) -> None:
@@ -76,6 +75,24 @@ def _binary_mask(gray: np.ndarray, threshold: int, invert: bool) -> np.ndarray:
     return mask
 
 
+def _simplify_contour(cnt: np.ndarray, simplify: float) -> np.ndarray:
+    """Reduce contour vertices. simplify is percent of perimeter (0 = none)."""
+    if simplify <= 0 or len(cnt) < 3:
+        return cnt
+
+    perimeter = cv2.arcLength(cnt, True)
+    if perimeter <= 0:
+        return cnt
+
+    epsilon = (simplify / 100.0) * perimeter
+    # Small features (stars, serifs) keep sharper corners than large regions.
+    if perimeter < 120:
+        epsilon = min(epsilon, perimeter * 0.025)
+
+    approx = cv2.approxPolyDP(cnt, epsilon, True)
+    return approx if len(approx) >= 3 else cnt
+
+
 def _contours_to_polygons(
     mask: np.ndarray,
     simplify: float,
@@ -95,8 +112,7 @@ def _contours_to_polygons(
         if len(cnt) < 3:
             continue
         parent = hierarchy[idx][3]
-        epsilon = max(simplify, 0.1)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        approx = _simplify_contour(cnt, simplify)
         if len(approx) < 3:
             continue
         ring = approx.reshape(-1, 2)
@@ -121,7 +137,7 @@ def _contours_to_polygons(
         if poly.is_empty or poly.area < 4:
             continue
         if not poly.is_valid:
-            poly = make_valid(poly)
+            poly = poly.buffer(0)
             if poly.is_empty or poly.geom_type != "Polygon":
                 continue
         polygons.append(poly)
