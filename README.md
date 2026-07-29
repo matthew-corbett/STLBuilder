@@ -5,7 +5,7 @@ Desktop app for designing **3D-printable leather stamps**. Create raised-letter 
 ## Features
 
 - **Text** — single or multi-line names and sayings
-- **Image** — import PNG/JPG logos or silhouettes and extrude them as raised relief
+- **Image / SVG** — import PNG/JPG silhouettes or SVG vector paths and extrude them as raised relief
 - **Font** — any installed Windows font, or load a custom `.ttf`
 - **Size** — letter height in millimeters
 - **Imprint depth** — how tall the raised letters are (how deep they press into leather)
@@ -62,12 +62,15 @@ Distribute either the whole `dist\STLBuilder` folder (portable) or the `STLBuild
 4. Leave **Mirror design** enabled so the stamped leather reads normally.
 5. Click **Update Preview**, then **Export STL…**.
 
-### Image stamp
+### Image / SVG stamp
 
-1. Choose **image** mode and click **Import image…** (PNG, JPG, BMP, GIF, or WebP).
-2. Adjust **stamp width**, **threshold**, and **edge simplify (%)** until the 3D preview looks right. Use a low simplify value (around 0.15%) for fine detail like small stars or text.
-3. Use **Invert** if you need light areas raised instead of dark (e.g. white logo on black).
-4. Set **imprint depth**, **base**, and **margin**, then preview and export.
+1. Choose **image** mode and click **Import image / SVG…** (PNG, JPG, BMP, GIF, WebP, or **SVG**).
+2. For **raster** images: adjust **stamp width**, **threshold**, and **edge simplify (%)**. For **SVG**: paths are imported as vectors (threshold/simplify are hidden).
+3. Use **Invert** if you need light areas / background raised instead of the filled shapes.
+4. Enable **Raised border around image** to add a rectangular frame outside the artwork (adjust **border width** as needed).
+5. Set **imprint depth**, **base**, and **margin**, then preview and export.
+
+SVG tip: convert text to outlines (paths) before importing — live `<text>` elements are skipped.
 
 Print with the **raised design facing up**. The flat back of the base sits on your press or mallet.
 
@@ -96,7 +99,8 @@ STLBuilder/
 ├── requirements.txt
 └── stlbuilder/
     ├── stamp_generator.py  # Text geometry + STL export
-    ├── image_stamp.py      # Image silhouette → STL
+    ├── image_stamp.py      # Image / SVG silhouette → STL
+    ├── svg_stamp.py        # SVG vector path parsing
     ├── draft.py            # .stldraft save/load
     ├── geometry_utils.py   # Shared base plate helpers
     ├── fonts.py            # System font listing

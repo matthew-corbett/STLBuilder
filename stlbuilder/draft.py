@@ -50,6 +50,8 @@ def collect_settings_dict(
     invert: bool,
     simplify: float,
     orientation: str = "horizontal",
+    raised_border: bool = False,
+    border_width: float = 1.5,
 ) -> dict[str, Any]:
     return {
         "version": DRAFT_VERSION,
@@ -74,6 +76,8 @@ def collect_settings_dict(
             "simplify": simplify,
             "has_image": bool(image_path),
             "original_image_name": Path(image_path).name if image_path else None,
+            "raised_border": raised_border,
+            "border_width": border_width,
         },
     }
 

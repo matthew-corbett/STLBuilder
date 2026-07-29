@@ -16,6 +16,7 @@ from PIL import Image, ImageOps
 from stlbuilder.draft import collect_settings_dict, load_draft, save_draft
 from stlbuilder.fonts import FontOption, list_system_fonts
 from stlbuilder.image_stamp import ImageStampSettings, build_image_stamp, preview_image_mask
+from stlbuilder.svg_stamp import is_svg_path
 from stlbuilder.stamp_generator import (
     StampGenerationError,
     StampSettings,
@@ -196,7 +197,7 @@ class StampDesignerApp(ctk.CTk):
 
         ctk.CTkButton(
             self._image_frame,
-            text="Import image…",
+            text="Import image / SVG…",
             command=self._on_load_image,
             height=32,
         ).grid(row=image_row, column=0, sticky="ew", pady=(4, 2))
@@ -229,33 +230,60 @@ class StampDesignerApp(ctk.CTk):
         )
         image_row += 1
 
+        self._raster_controls = ctk.CTkFrame(self._image_frame, fg_color="transparent")
+        self._raster_controls.grid(row=image_row, column=0, sticky="ew")
+        self._raster_controls.grid_columnconfigure(0, weight=1)
+        raster_row = 0
+
         self._threshold = self._labeled_slider(
-            self._image_frame, image_row, "Threshold", 0, 255, 128
+            self._raster_controls, raster_row, "Threshold", 0, 255, 128
         )
-        image_row += 1
+        raster_row += 1
 
         self._simplify = self._labeled_slider(
-            self._image_frame, image_row, "Edge simplify (%)", 0.05, 2.0, 0.15, resolution=0.05
+            self._raster_controls,
+            raster_row,
+            "Edge simplify (%)",
+            0.05,
+            2.0,
+            0.15,
+            resolution=0.05,
         )
+        raster_row += 1
         image_row += 1
 
         self._invert_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             self._image_frame,
-            text="Invert (raise light areas instead of dark)",
+            text="Invert (raise light / background instead)",
             variable=self._invert_var,
             command=self._refresh_image_preview,
         ).grid(row=image_row, column=0, sticky="w", pady=4)
         image_row += 1
 
-        ctk.CTkLabel(
+        self._raised_border_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
             self._image_frame,
-            text="Works best with high-contrast logos or silhouettes on a plain background.",
+            text="Raised border around image",
+            variable=self._raised_border_var,
+            command=self._refresh_image_preview,
+        ).grid(row=image_row, column=0, sticky="w", pady=4)
+        image_row += 1
+
+        self._border_width = self._labeled_slider(
+            self._image_frame, image_row, "Border width (mm)", 0.5, 5.0, 1.5, resolution=0.1
+        )
+        image_row += 1
+
+        self._image_hint = ctk.CTkLabel(
+            self._image_frame,
+            text="PNG/JPG: high-contrast silhouettes. SVG: filled vector paths (convert text to outlines).",
             wraplength=300,
             justify="left",
             font=ctk.CTkFont(size=11),
             text_color="gray",
-        ).grid(row=image_row, column=0, sticky="w", pady=2)
+        )
+        self._image_hint.grid(row=image_row, column=0, sticky="w", pady=2)
 
         row += 1
         self._shared_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
@@ -302,6 +330,7 @@ class StampDesignerApp(ctk.CTk):
         self._bind_slider_refresh(self._threshold, self._refresh_image_preview)
         self._bind_slider_refresh(self._simplify, self._refresh_image_preview)
         self._bind_slider_refresh(self._stamp_width, self._refresh_image_preview)
+        self._bind_slider_refresh(self._border_width, self._refresh_image_preview)
 
     def _bind_slider_refresh(self, slider: ctk.CTkSlider, callback) -> None:
         original = slider.cget("command")
@@ -320,6 +349,7 @@ class StampDesignerApp(ctk.CTk):
         else:
             self._text_frame.grid_remove()
             self._image_frame.grid()
+            self._update_image_controls_for_source()
             self._refresh_image_preview()
 
     def _labeled_slider(
@@ -412,6 +442,8 @@ class StampDesignerApp(ctk.CTk):
             threshold=int(round(self._slider_value(self._threshold))),
             invert=self._invert_var.get(),
             simplify=self._slider_value(self._simplify),
+            raised_border=self._raised_border_var.get(),
+            border_width=self._slider_value(self._border_width),
         )
 
     def _on_font_selected(self, _choice: str) -> None:
@@ -433,9 +465,11 @@ class StampDesignerApp(ctk.CTk):
 
     def _on_load_image(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select stamp image",
+            title="Select stamp image or SVG",
             filetypes=[
-                ("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp"),
+                ("Images & SVG", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp;*.svg"),
+                ("SVG vector", "*.svg"),
+                ("Raster images", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp"),
                 ("All files", "*.*"),
             ],
         )
@@ -446,7 +480,21 @@ class StampDesignerApp(ctk.CTk):
             )
             self._mode.set("image")
             self._on_mode_changed("image")
+            self._update_image_controls_for_source()
             self._refresh_image_preview()
+
+    def _update_image_controls_for_source(self) -> None:
+        """Hide raster-only controls when an SVG is loaded."""
+        if self._image_path and is_svg_path(self._image_path):
+            self._raster_controls.grid_remove()
+            self._image_hint.configure(
+                text="SVG uses vector paths directly (threshold/simplify not needed). Convert text to outlines first."
+            )
+        else:
+            self._raster_controls.grid()
+            self._image_hint.configure(
+                text="PNG/JPG: high-contrast silhouettes. SVG: filled vector paths (convert text to outlines)."
+            )
 
     def _refresh_image_preview(self) -> None:
         if not self._image_path or self._mode.get() != "image":
@@ -518,6 +566,8 @@ class StampDesignerApp(ctk.CTk):
             invert=self._invert_var.get(),
             simplify=self._slider_value(self._simplify),
             orientation=self._orientation.get(),
+            raised_border=self._raised_border_var.get(),
+            border_width=self._slider_value(self._border_width),
         )
 
     def _on_save_draft(self) -> None:
@@ -674,6 +724,8 @@ class StampDesignerApp(ctk.CTk):
         self._set_slider(self._threshold, image.get("threshold", 128))
         self._set_slider(self._simplify, image.get("simplify", 0.15))
         self._invert_var.set(bool(image.get("invert", False)))
+        self._raised_border_var.set(bool(image.get("raised_border", False)))
+        self._set_slider(self._border_width, image.get("border_width", 1.5))
 
         if draft.image_path is not None:
             self._image_path = str(draft.image_path)
@@ -692,6 +744,7 @@ class StampDesignerApp(ctk.CTk):
             mode = "text"
         self._mode.set(mode)
         self._on_mode_changed(mode)
+        self._update_image_controls_for_source()
 
         if draft.stl_path is not None:
             try:

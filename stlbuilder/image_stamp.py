@@ -13,6 +13,14 @@ from shapely.geometry import Polygon
 
 from stlbuilder.geometry_utils import apply_mirror, build_base_plate
 from stlbuilder.stamp_generator import StampGenerationError
+from stlbuilder.svg_stamp import (
+    flip_y_polygons,
+    invert_polygons,
+    is_svg_path,
+    rasterize_polygons,
+    scale_polygons_to_width,
+    svg_to_polygons,
+)
 
 
 @dataclass
@@ -27,6 +35,8 @@ class ImageStampSettings:
     invert: bool = False
     simplify: float = 0.15
     max_pixels: int = 1000
+    raised_border: bool = False
+    border_width: float = 1.5
 
 
 def _validate_settings(settings: ImageStampSettings) -> None:
@@ -43,6 +53,8 @@ def _validate_settings(settings: ImageStampSettings) -> None:
         raise StampGenerationError("Margin cannot be negative.")
     if not 0 <= settings.threshold <= 255:
         raise StampGenerationError("Threshold must be between 0 and 255.")
+    if settings.raised_border and settings.border_width <= 0:
+        raise StampGenerationError("Border width must be greater than zero.")
 
 
 def _load_grayscale_array(path: str, max_pixels: int) -> np.ndarray:
@@ -170,49 +182,83 @@ def _scale_polygons(
     return scaled
 
 
+def _clean_ring(coords) -> list[tuple[float, float]]:
+    pts = [(float(x), float(y)) for x, y in coords]
+    if len(pts) >= 2 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    cleaned: list[tuple[float, float]] = []
+    for p in pts:
+        if not cleaned or (
+            abs(cleaned[-1][0] - p[0]) > 1e-6 or abs(cleaned[-1][1] - p[1]) > 1e-6
+        ):
+            cleaned.append(p)
+    if len(cleaned) >= 4 and cleaned[0] == cleaned[-1]:
+        cleaned = cleaned[:-1]
+    return cleaned
+
+
 def _extrude_polygon(poly: Polygon, depth: float) -> cq.Workplane | None:
     if poly.is_empty or poly.area <= 0:
         return None
 
-    outer = [(float(x), float(y)) for x, y in poly.exterior.coords]
+    outer = _clean_ring(poly.exterior.coords)
     if len(outer) < 3:
         return None
 
-    wp = cq.Workplane("XY").polyline(outer).close().extrude(depth)
+    try:
+        wp = cq.Workplane("XY").polyline(outer).close().extrude(depth)
+    except Exception:
+        return None
 
     for interior in poly.interiors:
-        hole = [(float(x), float(y)) for x, y in interior.coords]
-        if len(hole) >= 3:
-            wp = wp.cut(cq.Workplane("XY").polyline(hole).close().extrude(depth + 0.01))
+        hole = _clean_ring(interior.coords)
+        if len(hole) < 3:
+            continue
+        try:
+            cutter = cq.Workplane("XY").polyline(hole).close().extrude(depth + 0.01)
+            wp = wp.cut(cutter)
+        except Exception:
+            continue
 
     return wp
 
 
-def build_image_stamp(settings: ImageStampSettings) -> cq.Workplane:
-    """Build a stamp from a bitmap silhouette (dark areas become raised relief)."""
-    _validate_settings(settings)
+def _raised_border_frame(
+    width_mm: float,
+    height_mm: float,
+    border_width: float,
+    depth: float,
+) -> cq.Workplane:
+    """Rectangular raised frame just outside the image canvas."""
+    outer_w = width_mm + 2 * border_width
+    outer_h = height_mm + 2 * border_width
+    outer = cq.Workplane("XY").rect(outer_w, outer_h).extrude(depth)
+    # Slightly taller cut so the inner opening is clean.
+    inner = cq.Workplane("XY").rect(width_mm, height_mm).extrude(depth + 0.01)
+    return outer.cut(inner)
 
-    gray = _load_grayscale_array(settings.image_path, settings.max_pixels)
-    mask = _binary_mask(gray, settings.threshold, settings.invert)
-    polygons = _contours_to_polygons(mask, settings.simplify)
-    if not polygons:
-        raise StampGenerationError(
-            "No stamp shapes found. Adjust threshold/invert or use a higher-contrast image."
-        )
 
-    polygons = _scale_polygons(polygons, settings.width_mm, gray.shape)
-    relief_parts: list[cq.Workplane] = []
-    for poly in polygons:
-        part = _extrude_polygon(poly, settings.imprint_depth)
-        if part is not None:
-            relief_parts.append(part)
-
-    if not relief_parts:
-        raise StampGenerationError("Could not extrude image shapes.")
-
-    relief = relief_parts[0]
-    for part in relief_parts[1:]:
+def _union_relief(parts: list[cq.Workplane]) -> cq.Workplane:
+    relief = parts[0]
+    for part in parts[1:]:
         relief = relief.union(part)
+    return relief
+
+
+def _finish_stamp(
+    relief: cq.Workplane,
+    settings: ImageStampSettings,
+    canvas_width_mm: float,
+    canvas_height_mm: float,
+) -> cq.Workplane:
+    if settings.raised_border:
+        frame = _raised_border_frame(
+            canvas_width_mm,
+            canvas_height_mm,
+            settings.border_width,
+            settings.imprint_depth,
+        )
+        relief = relief.union(frame)
 
     relief = apply_mirror(relief, settings.mirror_for_leather)
 
@@ -228,7 +274,89 @@ def build_image_stamp(settings: ImageStampSettings) -> cq.Workplane:
     return base.union(relief)
 
 
-def preview_image_mask(settings: ImageStampSettings) -> np.ndarray:
-    """Return binary mask for 2D preview in the UI."""
+def _build_from_svg(settings: ImageStampSettings) -> cq.Workplane:
+    polygons, src_w, src_h = svg_to_polygons(settings.image_path)
+    if settings.invert:
+        polygons = invert_polygons(polygons, src_w, src_h)
+        if not polygons:
+            raise StampGenerationError("Invert left no shapes to extrude.")
+
+    polygons = flip_y_polygons(polygons, src_h)
+    polygons, height_mm = scale_polygons_to_width(
+        polygons, src_w, src_h, settings.width_mm
+    )
+
+    relief_parts: list[cq.Workplane] = []
+    for poly in polygons:
+        part = _extrude_polygon(poly, settings.imprint_depth)
+        if part is not None:
+            relief_parts.append(part)
+
+    if not relief_parts:
+        raise StampGenerationError("Could not extrude SVG shapes.")
+
+    return _finish_stamp(
+        _union_relief(relief_parts), settings, settings.width_mm, height_mm
+    )
+
+
+def _build_from_raster(settings: ImageStampSettings) -> cq.Workplane:
     gray = _load_grayscale_array(settings.image_path, settings.max_pixels)
-    return _binary_mask(gray, settings.threshold, settings.invert)
+    mask = _binary_mask(gray, settings.threshold, settings.invert)
+    polygons = _contours_to_polygons(mask, settings.simplify)
+    if not polygons:
+        raise StampGenerationError(
+            "No stamp shapes found. Adjust threshold/invert or use a higher-contrast image."
+        )
+
+    img_h, img_w = gray.shape
+    height_mm = settings.width_mm * (img_h / img_w) if img_w > 0 else settings.width_mm
+    polygons = _scale_polygons(polygons, settings.width_mm, gray.shape)
+    relief_parts: list[cq.Workplane] = []
+    for poly in polygons:
+        part = _extrude_polygon(poly, settings.imprint_depth)
+        if part is not None:
+            relief_parts.append(part)
+
+    if not relief_parts:
+        raise StampGenerationError("Could not extrude image shapes.")
+
+    return _finish_stamp(
+        _union_relief(relief_parts), settings, settings.width_mm, height_mm
+    )
+
+
+def build_image_stamp(settings: ImageStampSettings) -> cq.Workplane:
+    """Build a stamp from a bitmap silhouette or SVG vector paths."""
+    _validate_settings(settings)
+    if is_svg_path(settings.image_path):
+        return _build_from_svg(settings)
+    return _build_from_raster(settings)
+
+
+def preview_image_mask(settings: ImageStampSettings) -> np.ndarray:
+    """Return binary mask for 2D preview in the UI (includes optional border)."""
+    if is_svg_path(settings.image_path):
+        polygons, src_w, src_h = svg_to_polygons(settings.image_path)
+        if settings.invert:
+            polygons = invert_polygons(polygons, src_w, src_h)
+        mask = rasterize_polygons(polygons, src_w, src_h, settings.max_pixels)
+    else:
+        gray = _load_grayscale_array(settings.image_path, settings.max_pixels)
+        mask = _binary_mask(gray, settings.threshold, settings.invert)
+
+    if not settings.raised_border or settings.border_width <= 0:
+        return mask
+
+    img_h, img_w = mask.shape
+    if img_w <= 0:
+        return mask
+    px_per_mm = img_w / settings.width_mm
+    border_px = max(1, int(round(settings.border_width * px_per_mm)))
+    framed = np.zeros((img_h + 2 * border_px, img_w + 2 * border_px), dtype=np.uint8)
+    framed[border_px : border_px + img_h, border_px : border_px + img_w] = mask
+    framed[:border_px, :] = 255
+    framed[-border_px:, :] = 255
+    framed[:, :border_px] = 255
+    framed[:, -border_px:] = 255
+    return framed
