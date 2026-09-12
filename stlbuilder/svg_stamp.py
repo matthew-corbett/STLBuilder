@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path as FilePath
 
 import cv2
 import numpy as np
+from matplotlib.font_manager import FontProperties
+from matplotlib.path import Path as MplPath
+from matplotlib.textpath import TextPath
 from shapely.geometry import LineString, Polygon, box
 from shapely.ops import unary_union
 from svgelements import (
@@ -19,13 +23,16 @@ from svgelements import (
     Use,
     Move,
     Close,
+    Circle,
+    Ellipse,
 )
 
 from stlbuilder.stamp_generator import StampGenerationError
 
-# denser sampling = smoother curves, heavier CAD
-_CURVE_SAMPLES = 32
-_MIN_AREA = 1e-6
+# Curve discretization: aim for short edge lengths so arcs stay smooth on the stamp.
+_MIN_SAMPLES_PER_CURVE = 64
+_MAX_SAMPLES_PER_CURVE = 480
+_MIN_AREA = 1e-8
 
 
 def is_svg_path(path: str | FilePath) -> bool:
@@ -47,8 +54,28 @@ def _is_paint_none(paint) -> bool:
     return False
 
 
-def _sample_path_rings(path: SvgPath) -> list[list[tuple[float, float]]]:
-    """Convert a Path into closed rings by sampling each subpath."""
+def _step_for_svg(diagonal: float) -> float:
+    """SVG-unit step length targeting ~0.3 mm chords on a ~50 mm-wide stamp."""
+    if diagonal <= 0:
+        return 0.12
+    return max(0.04, min(0.4, diagonal * 0.0005))
+
+
+def _curve_sample_count(seg, step: float) -> int:
+    try:
+        length = float(seg.length())
+    except Exception:
+        length = 20.0
+    if length <= 0:
+        return _MIN_SAMPLES_PER_CURVE
+    n = int(math.ceil(length / max(step, 1e-6)))
+    return max(_MIN_SAMPLES_PER_CURVE, min(_MAX_SAMPLES_PER_CURVE, n))
+
+
+def _sample_path_rings(
+    path: SvgPath, step: float = 0.1
+) -> list[list[tuple[float, float]]]:
+    """Convert a Path into closed rings with dense arc-length sampling."""
     rings: list[list[tuple[float, float]]] = []
     for subpath in path.as_subpaths():
         if not subpath:
@@ -69,8 +96,9 @@ def _sample_path_rings(path: SvgPath) -> list[list[tuple[float, float]]]:
             if type(seg).__name__ == "Line":
                 pts.append((float(seg.end.x), float(seg.end.y)))
                 continue
-            for i in range(1, _CURVE_SAMPLES + 1):
-                p = seg.point(i / _CURVE_SAMPLES)
+            n = _curve_sample_count(seg, step)
+            for i in range(1, n + 1):
+                p = seg.point(i / n)
                 pts.append((float(p.x), float(p.y)))
 
         cleaned: list[tuple[float, float]] = []
@@ -170,20 +198,18 @@ def _shape_has_stroke(element: Shape) -> bool:
 
 
 def _fill_is_raised(element: Shape) -> bool:
-    """Dark fills raise on the stamp; light/white fills cut holes (paint order)."""
+    """Non-background fills raise on the stamp; near-white punches holes."""
     fill = getattr(element, "fill", None)
     if _is_paint_none(fill):
         return False
     if not isinstance(fill, Color):
         return True
-    # Luminance relative to white: cut if mostly light.
     try:
-        r, g, b = fill.red, fill.green, fill.blue
-        # svgelements channels are 0-255
-        luma = (0.299 * float(r) + 0.587 * float(g) + 0.114 * float(b)) / 255.0
+        r, g, b = float(fill.red), float(fill.green), float(fill.blue)
     except Exception:
         return True
-    return luma < 0.85
+    # Only near-white is treated as background (keeps gold/yellow/gray text).
+    return not (r >= 245 and g >= 245 and b >= 245)
 
 
 def _geometry_to_polygon_list(geom) -> list[Polygon]:
@@ -222,6 +248,262 @@ def _stroke_rings_to_polygons(
     return out
 
 
+def _font_family_name(element: Text) -> str:
+    family = getattr(element, "font_family", None) or "Arial"
+    if isinstance(family, (list, tuple)):
+        family = family[0] if family else "Arial"
+    family = str(family)
+    if "," in family:
+        family = family.split(",")[0]
+    return family.strip().strip("'\"") or "Arial"
+
+
+def _mpl_path_to_rings(path: MplPath) -> list[list[tuple[float, float]]]:
+    """Convert a matplotlib path into closed coordinate rings."""
+    rings: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    verts = path.vertices
+    codes = path.codes
+    if codes is None:
+        if len(verts) >= 3:
+            rings.append([(float(x), float(y)) for x, y in verts])
+        return rings
+
+    i = 0
+    while i < len(codes):
+        code = codes[i]
+        if code == MplPath.MOVETO:
+            if len(current) >= 3:
+                rings.append(current)
+            current = [(float(verts[i][0]), float(verts[i][1]))]
+            i += 1
+        elif code == MplPath.LINETO:
+            current.append((float(verts[i][0]), float(verts[i][1])))
+            i += 1
+        elif code == MplPath.CURVE3:
+            p0 = current[-1] if current else (float(verts[i][0]), float(verts[i][1]))
+            p1 = (float(verts[i][0]), float(verts[i][1]))
+            p2 = (float(verts[i + 1][0]), float(verts[i + 1][1]))
+            for t in range(1, 25):
+                u = t / 24.0
+                x = (1 - u) ** 2 * p0[0] + 2 * (1 - u) * u * p1[0] + u**2 * p2[0]
+                y = (1 - u) ** 2 * p0[1] + 2 * (1 - u) * u * p1[1] + u**2 * p2[1]
+                current.append((x, y))
+            i += 2
+        elif code == MplPath.CURVE4:
+            p0 = current[-1] if current else (float(verts[i][0]), float(verts[i][1]))
+            p1 = (float(verts[i][0]), float(verts[i][1]))
+            p2 = (float(verts[i + 1][0]), float(verts[i + 1][1]))
+            p3 = (float(verts[i + 2][0]), float(verts[i + 2][1]))
+            for t in range(1, 33):
+                u = t / 32.0
+                x = (
+                    (1 - u) ** 3 * p0[0]
+                    + 3 * (1 - u) ** 2 * u * p1[0]
+                    + 3 * (1 - u) * u**2 * p2[0]
+                    + u**3 * p3[0]
+                )
+                y = (
+                    (1 - u) ** 3 * p0[1]
+                    + 3 * (1 - u) ** 2 * u * p1[1]
+                    + 3 * (1 - u) * u**2 * p2[1]
+                    + u**3 * p3[1]
+                )
+                current.append((x, y))
+            i += 3
+        elif code == MplPath.CLOSEPOLY:
+            if len(current) >= 3:
+                rings.append(current)
+            current = []
+            i += 1
+        else:
+            i += 1
+
+    if len(current) >= 3:
+        rings.append(current)
+    return rings
+
+
+def _text_to_polygons(element: Text) -> list[Polygon]:
+    """Outline live SVG <text> using a system font (matplotlib TextPath)."""
+    content = element.text
+    if content is None:
+        return []
+    content = str(content)
+    if not content.strip():
+        return []
+
+    try:
+        size = float(element.font_size or 12.0)
+    except (TypeError, ValueError):
+        size = 12.0
+    if size <= 0:
+        return []
+
+    family = _font_family_name(element)
+    weight = (
+        "bold"
+        if str(getattr(element, "font_weight", "")).lower()
+        in ("bold", "bolder", "700", "800", "900")
+        else "normal"
+    )
+    style = (
+        "italic"
+        if str(getattr(element, "font_style", "")).lower() in ("italic", "oblique")
+        else "normal"
+    )
+
+    try:
+        prop = FontProperties(family=family, size=size, weight=weight, style=style)
+        # Size is in SVG user units so glyph outlines match font-size.
+        tp = TextPath((0, 0), content, size=size, prop=prop, usetex=False)
+    except Exception:
+        return []
+
+    rings = _mpl_path_to_rings(tp)
+    if not rings:
+        return []
+
+    try:
+        origin_x = float(element.x or 0.0)
+        origin_y = float(element.y or 0.0)
+    except (TypeError, ValueError):
+        origin_x, origin_y = 0.0, 0.0
+
+    transform = getattr(element, "transform", None)
+    placed: list[list[tuple[float, float]]] = []
+    for ring in rings:
+        pts: list[tuple[float, float]] = []
+        for mx, my in ring:
+            # Matplotlib Y-up → SVG Y-down around the text baseline.
+            sx = origin_x + mx
+            sy = origin_y - my
+            if transform is not None:
+                try:
+                    pt = transform.point_in_matrix_space(sx, sy)
+                    sx, sy = float(pt.x), float(pt.y)
+                except Exception:
+                    pass
+            pts.append((sx, sy))
+        placed.append(pts)
+
+    polys = [_ring_to_polygon(r) for r in placed]
+    polys = [p for p in polys if p is not None]
+    return _nest_polygons(polys)
+
+
+def _svg_diagonal(svg: SVG) -> float:
+    try:
+        bbox = svg.bbox()
+        if bbox is None:
+            return 100.0
+        minx, miny, maxx, maxy = bbox
+        diagonal = ((maxx - minx) ** 2 + (maxy - miny) ** 2) ** 0.5
+        return diagonal if diagonal > 0 else 100.0
+    except Exception:
+        return 100.0
+
+
+def _circle_ellipse_rings(element: Shape, step: float) -> list[list[tuple[float, float]]] | None:
+    """Dense angular sampling for Circle/Ellipse (avoids coarse Arc approximation)."""
+    if isinstance(element, Circle):
+        try:
+            cx, cy = float(element.cx), float(element.cy)
+            r = float(getattr(element, "r", None) or element.rx)
+        except Exception:
+            return None
+        if r <= 0:
+            return None
+        circumference = 2.0 * math.pi * r
+        n = max(96, min(480, int(math.ceil(circumference / max(step, 1e-6)))))
+        ring = []
+        for i in range(n):
+            a = 2.0 * math.pi * i / n
+            x = cx + r * math.cos(a)
+            y = cy + r * math.sin(a)
+            transform = getattr(element, "transform", None)
+            if transform is not None:
+                try:
+                    pt = transform.point_in_matrix_space(x, y)
+                    x, y = float(pt.x), float(pt.y)
+                except Exception:
+                    pass
+            ring.append((x, y))
+        return [ring]
+
+    if isinstance(element, Ellipse):
+        try:
+            cx, cy = float(element.cx), float(element.cy)
+            rx, ry = float(element.rx), float(element.ry)
+        except Exception:
+            return None
+        if rx <= 0 or ry <= 0:
+            return None
+        # Ramanujan approximation for perimeter.
+        h = ((rx - ry) ** 2) / ((rx + ry) ** 2) if (rx + ry) else 0.0
+        circumference = math.pi * (rx + ry) * (1.0 + 3.0 * h / (10.0 + math.sqrt(max(0.0, 4.0 - 3.0 * h))))
+        n = max(96, min(480, int(math.ceil(circumference / max(step, 1e-6)))))
+        ring = []
+        for i in range(n):
+            a = 2.0 * math.pi * i / n
+            x = cx + rx * math.cos(a)
+            y = cy + ry * math.sin(a)
+            transform = getattr(element, "transform", None)
+            if transform is not None:
+                try:
+                    pt = transform.point_in_matrix_space(x, y)
+                    x, y = float(pt.x), float(pt.y)
+                except Exception:
+                    pass
+            ring.append((x, y))
+        return [ring]
+
+    return None
+
+
+def _element_to_geometry(element: Shape, step: float = 0.1):
+    """Return Shapely geometry for a shape or text element, or None."""
+    if isinstance(element, Text):
+        polys = _text_to_polygons(element)
+        if not polys:
+            return None
+        return unary_union(polys)
+
+    has_fill = _shape_has_fill(element)
+    has_stroke = _shape_has_stroke(element)
+    if not has_fill and not has_stroke:
+        return None
+
+    rings = _circle_ellipse_rings(element, step)
+    if rings is None:
+        try:
+            path_geom = SvgPath(element)
+            path_geom.reify()
+        except Exception:
+            return None
+        rings = _sample_path_rings(path_geom, step=step)
+
+    if not rings:
+        return None
+
+    parts: list[Polygon] = []
+    if has_fill:
+        shape_polys = [_ring_to_polygon(r) for r in rings]
+        shape_polys = [p for p in shape_polys if p is not None]
+        if shape_polys:
+            parts.extend(_nest_polygons(shape_polys))
+    elif has_stroke:
+        try:
+            stroke_w = float(element.stroke_width or 1.0)
+        except (TypeError, ValueError):
+            stroke_w = 1.0
+        parts.extend(_stroke_rings_to_polygons(rings, stroke_w))
+
+    if not parts:
+        return None
+    return unary_union(parts)
+
+
 def svg_to_polygons(path: str | FilePath) -> tuple[list[Polygon], float, float]:
     """Load an SVG and return (polygons in SVG coords, width, height).
 
@@ -234,50 +516,33 @@ def svg_to_polygons(path: str | FilePath) -> tuple[list[Polygon], float, float]:
     except Exception as exc:
         raise StampGenerationError("Could not parse SVG file.") from exc
 
-    flat_polys: list[Polygon] = []
+    step = _step_for_svg(_svg_diagonal(svg))
     composed = None  # paint-order boolean composition
+    skipped_text = 0
 
     for element in svg.elements():
-        if isinstance(element, (Group, Text, Image, Use, SVG)):
+        if isinstance(element, (Group, Image, Use, SVG)):
             continue
+        if isinstance(element, Text):
+            shape_geom = _element_to_geometry(element, step=step)
+            if shape_geom is None or shape_geom.is_empty:
+                skipped_text += 1
+                continue
+            if _fill_is_raised(element) or _shape_has_stroke(element):
+                composed = shape_geom if composed is None else composed.union(shape_geom)
+            elif composed is not None:
+                composed = composed.difference(shape_geom)
+            continue
+
         if not isinstance(element, Shape):
             continue
 
-        has_fill = _shape_has_fill(element)
-        has_stroke = _shape_has_stroke(element)
-        if not has_fill and not has_stroke:
-            continue
-
-        try:
-            path_geom = SvgPath(element)
-            path_geom.reify()
-        except Exception:
-            continue
-
-        rings = _sample_path_rings(path_geom)
-        if not rings:
-            continue
-
-        shape_geom = None
-        if has_fill:
-            shape_polys = [_ring_to_polygon(r) for r in rings]
-            shape_polys = [p for p in shape_polys if p is not None]
-            if shape_polys:
-                shape_geom = unary_union(_nest_polygons(shape_polys))
-        elif has_stroke:
-            try:
-                stroke_w = float(element.stroke_width or 1.0)
-            except (TypeError, ValueError):
-                stroke_w = 1.0
-            stroked = _stroke_rings_to_polygons(rings, stroke_w)
-            if stroked:
-                shape_geom = unary_union(stroked)
-
+        shape_geom = _element_to_geometry(element, step=step)
         if shape_geom is None or shape_geom.is_empty:
             continue
 
+        has_fill = _shape_has_fill(element)
         if has_fill and not _fill_is_raised(element):
-            # Light fill punches a hole through earlier dark shapes.
             if composed is None:
                 continue
             composed = composed.difference(shape_geom)
@@ -285,9 +550,15 @@ def svg_to_polygons(path: str | FilePath) -> tuple[list[Polygon], float, float]:
             composed = shape_geom if composed is None else composed.union(shape_geom)
 
     if composed is None or composed.is_empty:
+        hint = ""
+        if skipped_text:
+            hint = (
+                f" ({skipped_text} text element(s) could not be outlined — "
+                "install the SVG's font or convert text to paths)."
+            )
         raise StampGenerationError(
-            "No filled shapes found in SVG. Use filled paths (not text-only) "
-            "or convert text to outlines before importing."
+            "No filled shapes found in SVG. Use filled paths "
+            "or convert text to outlines before importing." + hint
         )
 
     polygons = _geometry_to_polygon_list(composed)

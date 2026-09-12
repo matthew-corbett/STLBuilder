@@ -120,10 +120,26 @@ def build_stamp(settings: StampSettings) -> cq.Workplane:
     return base.union(text_wp)
 
 
-def export_stl(model: cq.Workplane, path: str | Path) -> Path:
+def export_stl(
+    model: cq.Workplane,
+    path: str | Path,
+    *,
+    tolerance: float = 0.01,
+    angular_tolerance: float = 0.02,
+) -> Path:
+    """Export an STL with curve-aware tessellation (smooth rings / rounded rims).
+
+    Analytic CadQuery circles (seal rings) tessellate via angular_tolerance;
+    ~0.02 rad ≈ 0.8° keeps 80 mm rings looking round without huge files.
+    """
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    cq.exporters.export(model, str(out))
+    cq.exporters.export(
+        model,
+        str(out),
+        tolerance=tolerance,
+        angularTolerance=angular_tolerance,
+    )
     return out
 
 
@@ -136,7 +152,7 @@ def model_to_trimesh(model: cq.Workplane):
     with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        cq.exporters.export(model, tmp_path)
+        export_stl(model, tmp_path)
         mesh = trimesh.load(tmp_path, force="mesh")
         if isinstance(mesh, trimesh.Scene):
             mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))

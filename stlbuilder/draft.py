@@ -52,7 +52,22 @@ def collect_settings_dict(
     orientation: str = "horizontal",
     raised_border: bool = False,
     border_width: float = 1.5,
+    mold_shape: str = "rounded_rect",
+    mold_length_mm: float = 180.0,
+    mold_width_mm: float = 130.0,
+    mold_height_mm: float = 18.0,
+    mold_corner_radius_mm: float = 12.0,
+    mold_draft_deg: float = 2.0,
+    mold_top_fillet_mm: float = 2.0,
+    mold_flange_mm: float = 8.0,
+    mold_leather_thickness_mm: float = 3.2,
+    mold_include_female: bool = False,
+    mold_target_width_mm: float = 180.0,
+    mold_threshold: int = 128,
+    mold_invert: bool = False,
+    mold_simplify: float = 0.0,
 ) -> dict[str, Any]:
+    has_image = bool(image_path)
     return {
         "version": DRAFT_VERSION,
         "mode": mode,
@@ -74,10 +89,28 @@ def collect_settings_dict(
             "threshold": threshold,
             "invert": invert,
             "simplify": simplify,
-            "has_image": bool(image_path),
+            "has_image": has_image,
             "original_image_name": Path(image_path).name if image_path else None,
             "raised_border": raised_border,
             "border_width": border_width,
+        },
+        "mold": {
+            "shape": mold_shape,
+            "length_mm": mold_length_mm,
+            "width_mm": mold_width_mm,
+            "height_mm": mold_height_mm,
+            "corner_radius_mm": mold_corner_radius_mm,
+            "draft_deg": mold_draft_deg,
+            "top_fillet_mm": mold_top_fillet_mm,
+            "flange_mm": mold_flange_mm,
+            "leather_thickness_mm": mold_leather_thickness_mm,
+            "include_female": mold_include_female,
+            "target_width_mm": mold_target_width_mm,
+            "threshold": mold_threshold,
+            "invert": mold_invert,
+            "simplify": mold_simplify,
+            "has_image": has_image and mold_shape == "silhouette",
+            "original_image_name": Path(image_path).name if image_path else None,
         },
     }
 
@@ -111,7 +144,8 @@ def save_draft(
             src = Path(image_path)
             dest = assets / f"{IMAGE_NAME}{src.suffix.lower() or '.png'}"
             shutil.copy2(src, dest)
-            settings["image"]["embedded_image"] = dest.name
+            settings.setdefault("image", {})["embedded_image"] = dest.name
+            settings.setdefault("mold", {})["embedded_image"] = dest.name
             (root / SETTINGS_NAME).write_text(
                 json.dumps(settings, indent=2), encoding="utf-8"
             )
@@ -119,7 +153,7 @@ def save_draft(
         if custom_font_path and Path(custom_font_path).is_file():
             dest = assets / CUSTOM_FONT_NAME
             shutil.copy2(custom_font_path, dest)
-            settings["text"]["embedded_font"] = CUSTOM_FONT_NAME
+            settings.setdefault("text", {})["embedded_font"] = CUSTOM_FONT_NAME
             (root / SETTINGS_NAME).write_text(
                 json.dumps(settings, indent=2), encoding="utf-8"
             )
@@ -182,7 +216,7 @@ def load_draft(path: str | Path) -> DraftData:
         )
 
     mode = settings.get("mode", "text")
-    if mode not in ("text", "image"):
+    if mode not in ("text", "image", "mold"):
         workspace.cleanup()
         raise StampGenerationError(f"Unknown draft mode: {mode}")
 
@@ -192,7 +226,8 @@ def load_draft(path: str | Path) -> DraftData:
 
     image_path = None
     image_meta = settings.get("image") or {}
-    embedded = image_meta.get("embedded_image")
+    mold_meta = settings.get("mold") or {}
+    embedded = image_meta.get("embedded_image") or mold_meta.get("embedded_image")
     if embedded:
         candidate = root / IMAGE_DIR / embedded
         if candidate.is_file():

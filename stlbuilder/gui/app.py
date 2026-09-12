@@ -1,4 +1,4 @@
-"""CustomTkinter front-end for designing leather stamps."""
+"""CustomTkinter front-end for leather stamps and valet-tray molds."""
 
 from __future__ import annotations
 
@@ -24,13 +24,21 @@ from stlbuilder.stamp_generator import (
     export_stl,
     model_to_trimesh,
 )
+from stlbuilder.valet_mold import (
+    SHAPE_OVAL,
+    SHAPE_RECT,
+    SHAPE_ROUNDED_RECT,
+    SHAPE_SILHOUETTE,
+    ValetMoldSettings,
+    build_valet_mold_set,
+)
 
 
 class StampDesignerApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
 
-        self.title("STL Builder — Leather Stamp Designer")
+        self.title("STL Builder — Stamps & Valet Molds")
         self.geometry("1150x760")
         self.minsize(950, 640)
 
@@ -41,20 +49,22 @@ class StampDesignerApp(ctk.CTk):
         self._custom_font_path: str | None = None
         self._image_path: str | None = None
         self._image_preview_ref: ctk.CTkImage | None = None
+        self._mold_preview_ref: ctk.CTkImage | None = None
         self._mode = ctk.StringVar(value="text")
         self._model = None
+        self._female_model = None
         self._busy = False
         self._draft_workspace = None
 
         self._build_layout()
         self._on_mode_changed("text")
-        self._set_status("Ready. Design your stamp and click Update Preview.")
+        self._set_status("Ready. Design a stamp or mold and click Update Preview.")
 
     def _build_layout(self) -> None:
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        sidebar = ctk.CTkScrollableFrame(self, width=340, label_text="Stamp settings")
+        sidebar = ctk.CTkScrollableFrame(self, width=340, label_text="Design settings")
         sidebar.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
         sidebar.grid_columnconfigure(0, weight=1)
 
@@ -103,11 +113,11 @@ class StampDesignerApp(ctk.CTk):
 
         row = 0
 
-        ctk.CTkLabel(sidebar, text="Stamp type").grid(row=row, column=0, sticky="w", pady=(4, 0))
+        ctk.CTkLabel(sidebar, text="Mode").grid(row=row, column=0, sticky="w", pady=(4, 0))
         row += 1
         ctk.CTkSegmentedButton(
             sidebar,
-            values=["text", "image"],
+            values=["text", "image", "mold"],
             variable=self._mode,
             command=self._on_mode_changed,
         ).grid(row=row, column=0, sticky="ew", pady=4)
@@ -244,9 +254,9 @@ class StampDesignerApp(ctk.CTk):
             self._raster_controls,
             raster_row,
             "Edge simplify (%)",
-            0.05,
+            0.0,
             2.0,
-            0.15,
+            0.0,
             resolution=0.05,
         )
         raster_row += 1
@@ -277,13 +287,163 @@ class StampDesignerApp(ctk.CTk):
 
         self._image_hint = ctk.CTkLabel(
             self._image_frame,
-            text="PNG/JPG: high-contrast silhouettes. SVG: filled vector paths (convert text to outlines).",
+            text=(
+                "PNG/JPG: small logos are upscaled before contouring so letter curves "
+                "stay smooth (seal rings use true circles). Prefer 1500px+ sources."
+            ),
             wraplength=300,
             justify="left",
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
         self._image_hint.grid(row=image_row, column=0, sticky="w", pady=2)
+
+        self._mold_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
+        self._mold_frame.grid(row=row, column=0, sticky="ew")
+        self._mold_frame.grid_columnconfigure(0, weight=1)
+        mold_row = 0
+
+        ctk.CTkLabel(self._mold_frame, text="Mold outline").grid(
+            row=mold_row, column=0, sticky="w", pady=(4, 0)
+        )
+        mold_row += 1
+        self._mold_shape = ctk.StringVar(value=SHAPE_ROUNDED_RECT)
+        self._mold_shape_menu = ctk.CTkOptionMenu(
+            self._mold_frame,
+            variable=self._mold_shape,
+            values=[SHAPE_RECT, SHAPE_ROUNDED_RECT, SHAPE_OVAL, SHAPE_SILHOUETTE],
+            command=self._on_mold_shape_changed,
+            width=280,
+        )
+        self._mold_shape_menu.grid(row=mold_row, column=0, sticky="ew", pady=4)
+        mold_row += 1
+
+        self._mold_size_frame = ctk.CTkFrame(self._mold_frame, fg_color="transparent")
+        self._mold_size_frame.grid(row=mold_row, column=0, sticky="ew")
+        self._mold_size_frame.grid_columnconfigure(0, weight=1)
+        size_row = 0
+        self._mold_length = self._labeled_slider(
+            self._mold_size_frame, size_row, "Length (mm)", 40, 300, 180
+        )
+        size_row += 1
+        self._mold_width = self._labeled_slider(
+            self._mold_size_frame, size_row, "Width (mm)", 40, 250, 130
+        )
+        size_row += 1
+        self._mold_corner = self._labeled_slider(
+            self._mold_size_frame, size_row, "Corner radius (mm)", 0, 60, 12
+        )
+        mold_row += 1
+
+        self._mold_silhouette_frame = ctk.CTkFrame(self._mold_frame, fg_color="transparent")
+        self._mold_silhouette_frame.grid(row=mold_row, column=0, sticky="ew")
+        self._mold_silhouette_frame.grid_columnconfigure(0, weight=1)
+        sil_row = 0
+        ctk.CTkButton(
+            self._mold_silhouette_frame,
+            text="Import silhouette / SVG…",
+            command=self._on_load_mold_silhouette,
+            height=32,
+        ).grid(row=sil_row, column=0, sticky="ew", pady=(4, 2))
+        sil_row += 1
+        self._mold_image_name_label = ctk.CTkLabel(
+            self._mold_silhouette_frame,
+            text="No silhouette loaded",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            wraplength=300,
+            justify="left",
+        )
+        self._mold_image_name_label.grid(row=sil_row, column=0, sticky="w")
+        sil_row += 1
+        self._mold_image_preview_label = ctk.CTkLabel(
+            self._mold_silhouette_frame,
+            text="Outline preview",
+            width=280,
+            height=120,
+            fg_color=("gray90", "gray20"),
+            corner_radius=6,
+        )
+        self._mold_image_preview_label.grid(row=sil_row, column=0, sticky="ew", pady=6)
+        sil_row += 1
+        self._mold_target_width = self._labeled_slider(
+            self._mold_silhouette_frame, sil_row, "Silhouette width (mm)", 40, 300, 180
+        )
+        sil_row += 1
+        self._mold_raster_controls = ctk.CTkFrame(
+            self._mold_silhouette_frame, fg_color="transparent"
+        )
+        self._mold_raster_controls.grid(row=sil_row, column=0, sticky="ew")
+        self._mold_raster_controls.grid_columnconfigure(0, weight=1)
+        mold_raster_row = 0
+        self._mold_threshold = self._labeled_slider(
+            self._mold_raster_controls, mold_raster_row, "Threshold", 0, 255, 128
+        )
+        mold_raster_row += 1
+        self._mold_simplify = self._labeled_slider(
+            self._mold_raster_controls,
+            mold_raster_row,
+            "Edge simplify (%)",
+            0.0,
+            2.0,
+            0.0,
+            resolution=0.05,
+        )
+        mold_raster_row += 1
+        self._mold_invert_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self._mold_raster_controls,
+            text="Invert silhouette",
+            variable=self._mold_invert_var,
+            command=self._refresh_mold_preview,
+        ).grid(row=mold_raster_row, column=0, sticky="w", pady=4)
+        mold_row += 1
+
+        self._mold_height = self._labeled_slider(
+            self._mold_frame, mold_row, "Mold height (mm)", 8, 40, 18
+        )
+        mold_row += 1
+        self._mold_draft = self._labeled_slider(
+            self._mold_frame, mold_row, "Draft angle (°)", 0, 10, 2, resolution=0.5
+        )
+        mold_row += 1
+        self._mold_fillet = self._labeled_slider(
+            self._mold_frame, mold_row, "Top edge fillet (mm)", 0, 6, 2, resolution=0.5
+        )
+        mold_row += 1
+        self._mold_flange = self._labeled_slider(
+            self._mold_frame, mold_row, "Base flange (mm)", 0, 25, 8
+        )
+        mold_row += 1
+        self._mold_leather = self._labeled_slider(
+            self._mold_frame,
+            mold_row,
+            "Leather thickness (mm)",
+            1.0,
+            6.0,
+            3.2,
+            resolution=0.1,
+        )
+        mold_row += 1
+        self._mold_female_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self._mold_frame,
+            text="Also build female collar",
+            variable=self._mold_female_var,
+        ).grid(row=mold_row, column=0, sticky="w", pady=6)
+        mold_row += 1
+        self._mold_hint = ctk.CTkLabel(
+            self._mold_frame,
+            text=(
+                "Wet-form leather over the male plug. Optional female collar "
+                "clamps leather around it (~8oz ≈ 3.2 mm)."
+            ),
+            wraplength=300,
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        self._mold_hint.grid(row=mold_row, column=0, sticky="w", pady=2)
 
         row += 1
         self._shared_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
@@ -314,7 +474,7 @@ class StampDesignerApp(ctk.CTk):
         ).grid(row=shared_row, column=0, sticky="w", pady=8)
         shared_row += 1
 
-        ctk.CTkLabel(
+        self._shared_hint = ctk.CTkLabel(
             self._shared_frame,
             text=(
                 "Raised areas extrude upward from the stamp face. "
@@ -325,12 +485,18 @@ class StampDesignerApp(ctk.CTk):
             justify="left",
             font=ctk.CTkFont(size=11),
             text_color="gray",
-        ).grid(row=shared_row, column=0, sticky="w", pady=4)
+        )
+        self._shared_hint.grid(row=shared_row, column=0, sticky="w", pady=4)
 
         self._bind_slider_refresh(self._threshold, self._refresh_image_preview)
         self._bind_slider_refresh(self._simplify, self._refresh_image_preview)
         self._bind_slider_refresh(self._stamp_width, self._refresh_image_preview)
         self._bind_slider_refresh(self._border_width, self._refresh_image_preview)
+        self._bind_slider_refresh(self._mold_threshold, self._refresh_mold_preview)
+        self._bind_slider_refresh(self._mold_simplify, self._refresh_mold_preview)
+        self._bind_slider_refresh(self._mold_target_width, self._refresh_mold_preview)
+
+        self._on_mold_shape_changed(self._mold_shape.get())
 
     def _bind_slider_refresh(self, slider: ctk.CTkSlider, callback) -> None:
         original = slider.cget("command")
@@ -343,14 +509,39 @@ class StampDesignerApp(ctk.CTk):
         slider.configure(command=wrapped)
 
     def _on_mode_changed(self, mode: str) -> None:
+        self._text_frame.grid_remove()
+        self._image_frame.grid_remove()
+        self._mold_frame.grid_remove()
+
         if mode == "text":
             self._text_frame.grid()
-            self._image_frame.grid_remove()
-        else:
-            self._text_frame.grid_remove()
+            self._shared_frame.grid()
+        elif mode == "image":
             self._image_frame.grid()
+            self._shared_frame.grid()
             self._update_image_controls_for_source()
             self._refresh_image_preview()
+        else:
+            self._mold_frame.grid()
+            self._shared_frame.grid_remove()
+            self._on_mold_shape_changed(self._mold_shape.get())
+
+    def _on_mold_shape_changed(self, shape: str) -> None:
+        if shape == SHAPE_SILHOUETTE:
+            self._mold_size_frame.grid_remove()
+            self._mold_silhouette_frame.grid()
+            self._update_mold_controls_for_source()
+            self._refresh_mold_preview()
+            return
+
+        self._mold_silhouette_frame.grid_remove()
+        self._mold_size_frame.grid()
+        # Corner radius only applies to rounded rectangles.
+        corner_parent = self._mold_corner.master
+        if shape == SHAPE_ROUNDED_RECT:
+            corner_parent.grid()
+        else:
+            corner_parent.grid_remove()
 
     def _labeled_slider(
         self,
@@ -446,6 +637,26 @@ class StampDesignerApp(ctk.CTk):
             border_width=self._slider_value(self._border_width),
         )
 
+    def _collect_mold_settings(self) -> ValetMoldSettings:
+        shape = self._mold_shape.get()
+        return ValetMoldSettings(
+            shape=shape,
+            length_mm=self._slider_value(self._mold_length),
+            width_mm=self._slider_value(self._mold_width),
+            height_mm=self._slider_value(self._mold_height),
+            corner_radius_mm=self._slider_value(self._mold_corner),
+            draft_deg=self._slider_value(self._mold_draft),
+            top_fillet_mm=self._slider_value(self._mold_fillet),
+            flange_mm=self._slider_value(self._mold_flange),
+            leather_thickness_mm=self._slider_value(self._mold_leather),
+            include_female=self._mold_female_var.get(),
+            image_path=self._image_path,
+            target_width_mm=self._slider_value(self._mold_target_width),
+            threshold=int(round(self._slider_value(self._mold_threshold))),
+            invert=self._mold_invert_var.get(),
+            simplify=self._slider_value(self._mold_simplify),
+        )
+
     def _on_font_selected(self, _choice: str) -> None:
         self._custom_font_path = None
         self._custom_font_label.configure(
@@ -483,18 +694,45 @@ class StampDesignerApp(ctk.CTk):
             self._update_image_controls_for_source()
             self._refresh_image_preview()
 
+    def _on_load_mold_silhouette(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select mold silhouette or SVG",
+            filetypes=[
+                ("Images & SVG", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp;*.svg"),
+                ("SVG vector", "*.svg"),
+                ("Raster images", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp"),
+                ("All files", "*.*"),
+            ],
+        )
+        if path:
+            self._image_path = path
+            self._mold_image_name_label.configure(
+                text=Path(path).name, text_color=("gray10", "gray90")
+            )
+            self._mold_shape.set(SHAPE_SILHOUETTE)
+            self._mode.set("mold")
+            self._on_mode_changed("mold")
+            self._update_mold_controls_for_source()
+            self._refresh_mold_preview()
+
     def _update_image_controls_for_source(self) -> None:
         """Hide raster-only controls when an SVG is loaded."""
         if self._image_path and is_svg_path(self._image_path):
             self._raster_controls.grid_remove()
             self._image_hint.configure(
-                text="SVG uses vector paths directly (threshold/simplify not needed). Convert text to outlines first."
+                text="SVG: vector paths + live text (system fonts). For exact letterforms, convert text to outlines in Inkscape/Illustrator."
             )
         else:
             self._raster_controls.grid()
             self._image_hint.configure(
-                text="PNG/JPG: high-contrast silhouettes. SVG: filled vector paths (convert text to outlines)."
+                text="PNG/JPG: high-contrast silhouettes. SVG: vector paths + live text (convert text to outlines for exact fonts)."
             )
+
+    def _update_mold_controls_for_source(self) -> None:
+        if self._image_path and is_svg_path(self._image_path):
+            self._mold_raster_controls.grid_remove()
+        else:
+            self._mold_raster_controls.grid()
 
     def _refresh_image_preview(self) -> None:
         if not self._image_path or self._mode.get() != "image":
@@ -512,6 +750,37 @@ class StampDesignerApp(ctk.CTk):
         except StampGenerationError:
             self._image_preview_label.configure(
                 image=None, text="Could not preview image"
+            )
+
+    def _refresh_mold_preview(self) -> None:
+        if (
+            self._mode.get() != "mold"
+            or self._mold_shape.get() != SHAPE_SILHOUETTE
+            or not self._image_path
+        ):
+            return
+        try:
+            settings = ImageStampSettings(
+                image_path=self._image_path,
+                width_mm=self._slider_value(self._mold_target_width),
+                threshold=int(round(self._slider_value(self._mold_threshold))),
+                invert=self._mold_invert_var.get(),
+                simplify=self._slider_value(self._mold_simplify),
+                raised_border=False,
+            )
+            mask = preview_image_mask(settings)
+            img = Image.fromarray(mask)
+            img = ImageOps.invert(img)
+            img.thumbnail((280, 120), Image.Resampling.LANCZOS)
+            self._mold_preview_ref = ctk.CTkImage(
+                light_image=img, dark_image=img, size=img.size
+            )
+            self._mold_image_preview_label.configure(
+                image=self._mold_preview_ref, text=""
+            )
+        except StampGenerationError:
+            self._mold_image_preview_label.configure(
+                image=None, text="Could not preview silhouette"
             )
 
     def _set_busy(self, busy: bool) -> None:
@@ -534,13 +803,19 @@ class StampDesignerApp(ctk.CTk):
         if self._busy:
             return
 
-        default_name = (
-            "leather_stamp_image.stl"
-            if self._mode.get() == "image"
-            else "leather_stamp.stl"
-        )
+        mode = self._mode.get()
+        if mode == "mold":
+            default_name = "valet_mold_male.stl"
+            title = "Save mold STL"
+        elif mode == "image":
+            default_name = "leather_stamp_image.stl"
+            title = "Save stamp STL"
+        else:
+            default_name = "leather_stamp.stl"
+            title = "Save stamp STL"
+
         path = filedialog.asksaveasfilename(
-            title="Save stamp STL",
+            title=title,
             defaultextension=".stl",
             filetypes=[("STL mesh", "*.stl")],
             initialfile=default_name,
@@ -568,6 +843,20 @@ class StampDesignerApp(ctk.CTk):
             orientation=self._orientation.get(),
             raised_border=self._raised_border_var.get(),
             border_width=self._slider_value(self._border_width),
+            mold_shape=self._mold_shape.get(),
+            mold_length_mm=self._slider_value(self._mold_length),
+            mold_width_mm=self._slider_value(self._mold_width),
+            mold_height_mm=self._slider_value(self._mold_height),
+            mold_corner_radius_mm=self._slider_value(self._mold_corner),
+            mold_draft_deg=self._slider_value(self._mold_draft),
+            mold_top_fillet_mm=self._slider_value(self._mold_fillet),
+            mold_flange_mm=self._slider_value(self._mold_flange),
+            mold_leather_thickness_mm=self._slider_value(self._mold_leather),
+            mold_include_female=self._mold_female_var.get(),
+            mold_target_width_mm=self._slider_value(self._mold_target_width),
+            mold_threshold=int(round(self._slider_value(self._mold_threshold))),
+            mold_invert=self._mold_invert_var.get(),
+            mold_simplify=self._slider_value(self._mold_simplify),
         )
 
     def _on_save_draft(self) -> None:
@@ -613,10 +902,17 @@ class StampDesignerApp(ctk.CTk):
 
             def work_build_then_save() -> None:
                 try:
-                    if self._mode.get() == "image":
+                    mode = self._mode.get()
+                    if mode == "image":
                         built = build_image_stamp(self._collect_image_settings())
+                        female = None
+                    elif mode == "mold":
+                        result = build_valet_mold_set(self._collect_mold_settings())
+                        built = result.male
+                        female = result.female
                     else:
                         built = build_stamp(self._collect_text_settings())
+                        female = None
                     out = save_draft(
                         path,
                         settings,
@@ -624,7 +920,12 @@ class StampDesignerApp(ctk.CTk):
                         image_path=image_path,
                         custom_font_path=custom_font_path,
                     )
-                    self.after(0, lambda: self._on_draft_saved(built, str(out)))
+                    self.after(
+                        0,
+                        lambda: self._on_draft_saved(
+                            built, str(out), female_model=female
+                        ),
+                    )
                 except StampGenerationError as exc:
                     self.after(0, lambda: self._on_error(str(exc)))
                 except Exception as exc:
@@ -645,14 +946,20 @@ class StampDesignerApp(ctk.CTk):
                     image_path=image_path,
                     custom_font_path=custom_font_path,
                 )
-                self.after(0, lambda: self._on_draft_saved(model, str(out)))
+                self.after(
+                    0,
+                    lambda: self._on_draft_saved(
+                        model, str(out), female_model=self._female_model
+                    ),
+                )
             except Exception as exc:
                 self.after(0, lambda: self._on_error(f"Could not save draft: {exc}"))
 
         threading.Thread(target=work_save, daemon=True).start()
 
-    def _on_draft_saved(self, model, path: str) -> None:
+    def _on_draft_saved(self, model, path: str, female_model=None) -> None:
         self._model = model
+        self._female_model = female_model
         if hasattr(model, "vertices"):
             self._update_preview_from_mesh(model)
         else:
@@ -690,6 +997,7 @@ class StampDesignerApp(ctk.CTk):
         shared = data.get("shared") or {}
         text = data.get("text") or {}
         image = data.get("image") or {}
+        mold = data.get("mold") or {}
 
         self._set_slider(self._imprint_depth, shared.get("imprint_depth", 2.0))
         self._set_slider(self._base_thickness, shared.get("base_thickness", 5.0))
@@ -722,15 +1030,40 @@ class StampDesignerApp(ctk.CTk):
         self._orientation.set(orientation)
         self._set_slider(self._stamp_width, image.get("width_mm", 40.0))
         self._set_slider(self._threshold, image.get("threshold", 128))
-        self._set_slider(self._simplify, image.get("simplify", 0.15))
+        self._set_slider(self._simplify, image.get("simplify", 0.0))
         self._invert_var.set(bool(image.get("invert", False)))
         self._raised_border_var.set(bool(image.get("raised_border", False)))
         self._set_slider(self._border_width, image.get("border_width", 1.5))
 
+        shape = mold.get("shape", SHAPE_ROUNDED_RECT)
+        if shape not in (SHAPE_RECT, SHAPE_ROUNDED_RECT, SHAPE_OVAL, SHAPE_SILHOUETTE):
+            shape = SHAPE_ROUNDED_RECT
+        self._mold_shape.set(shape)
+        self._set_slider(self._mold_length, mold.get("length_mm", 180.0))
+        self._set_slider(self._mold_width, mold.get("width_mm", 130.0))
+        self._set_slider(self._mold_height, mold.get("height_mm", 18.0))
+        self._set_slider(self._mold_corner, mold.get("corner_radius_mm", 12.0))
+        self._set_slider(self._mold_draft, mold.get("draft_deg", 2.0))
+        self._set_slider(self._mold_fillet, mold.get("top_fillet_mm", 2.0))
+        self._set_slider(self._mold_flange, mold.get("flange_mm", 8.0))
+        self._set_slider(self._mold_leather, mold.get("leather_thickness_mm", 3.2))
+        self._mold_female_var.set(bool(mold.get("include_female", False)))
+        self._set_slider(self._mold_target_width, mold.get("target_width_mm", 180.0))
+        self._set_slider(self._mold_threshold, mold.get("threshold", 128))
+        self._set_slider(self._mold_simplify, mold.get("simplify", 0.0))
+        self._mold_invert_var.set(bool(mold.get("invert", False)))
+
         if draft.image_path is not None:
             self._image_path = str(draft.image_path)
-            display_name = image.get("original_image_name") or draft.image_path.name
+            display_name = (
+                image.get("original_image_name")
+                or mold.get("original_image_name")
+                or draft.image_path.name
+            )
             self._image_name_label.configure(
+                text=display_name, text_color=("gray10", "gray90")
+            )
+            self._mold_image_name_label.configure(
                 text=display_name, text_color=("gray10", "gray90")
             )
         else:
@@ -738,14 +1071,23 @@ class StampDesignerApp(ctk.CTk):
             self._image_name_label.configure(text="No image loaded", text_color="gray")
             self._image_preview_label.configure(image=None, text="Mask preview")
             self._image_preview_ref = None
+            self._mold_image_name_label.configure(
+                text="No silhouette loaded", text_color="gray"
+            )
+            self._mold_image_preview_label.configure(image=None, text="Outline preview")
+            self._mold_preview_ref = None
 
         mode = draft.mode
         if mode == "image" and not self._image_path:
             mode = "text"
+        if mode == "mold" and shape == SHAPE_SILHOUETTE and not self._image_path:
+            mode = "mold"
+            self._mold_shape.set(SHAPE_ROUNDED_RECT)
         self._mode.set(mode)
         self._on_mode_changed(mode)
         self._update_image_controls_for_source()
 
+        self._female_model = None
         if draft.stl_path is not None:
             try:
                 mesh = trimesh.load(str(draft.stl_path), force="mesh")
@@ -771,14 +1113,20 @@ class StampDesignerApp(ctk.CTk):
             verts[:, 2],
             triangles=faces,
             color="#4a90d9",
-            edgecolor="#1a3a5c",
-            linewidth=0.08,
-            alpha=0.92,
+            edgecolor="none",
+            linewidth=0.0,
+            antialiased=True,
+            alpha=0.95,
         )
         self._ax.set_xlabel("X (mm)")
         self._ax.set_ylabel("Y (mm)")
         self._ax.set_zlabel("Z (mm)")
-        self._ax.set_title("Stamp (top = raised design)")
+        title = (
+            "Valet mold (male plug)"
+            if self._mode.get() == "mold"
+            else "Stamp (top = raised design)"
+        )
+        self._ax.set_title(title)
 
         # Match real mm proportions (matplotlib 3D otherwise stretches each axis
         # to a cube, which makes a thin base look much larger than the STL).
@@ -799,10 +1147,31 @@ class StampDesignerApp(ctk.CTk):
         self._fig.tight_layout()
         self._canvas.draw_idle()
 
+    def _export_mold_paths(self, export_path: str) -> tuple[str, str | None]:
+        """Return male path and optional female path derived from the save dialog."""
+        out = Path(export_path)
+        stem = out.stem
+        suffix = out.suffix or ".stl"
+        parent = out.parent
+        if stem.lower().endswith("_male"):
+            male_path = str(out)
+            female_path = str(parent / f"{stem[:-5]}_female{suffix}")
+        elif stem.lower().endswith("_female"):
+            base = stem[:-7]
+            male_path = str(parent / f"{base}_male{suffix}")
+            female_path = str(out)
+        else:
+            male_path = str(parent / f"{stem}_male{suffix}")
+            female_path = str(parent / f"{stem}_female{suffix}")
+        return male_path, female_path
+
     def _run_generation(self, preview_only: bool, export_path: str | None = None) -> None:
         try:
-            if self._mode.get() == "image":
+            mode = self._mode.get()
+            if mode == "image":
                 settings = self._collect_image_settings()
+            elif mode == "mold":
+                settings = self._collect_mold_settings()
             else:
                 settings = self._collect_text_settings()
         except StampGenerationError as exc:
@@ -814,13 +1183,36 @@ class StampDesignerApp(ctk.CTk):
 
         def work() -> None:
             try:
+                female = None
                 if isinstance(settings, ImageStampSettings):
                     model = build_image_stamp(settings)
+                    exported = export_path
+                    if export_path:
+                        export_stl(model, export_path)
+                elif isinstance(settings, ValetMoldSettings):
+                    result = build_valet_mold_set(settings)
+                    model = result.male
+                    female = result.female
+                    if export_path:
+                        male_path, female_path = self._export_mold_paths(export_path)
+                        export_stl(model, male_path)
+                        exported = male_path
+                        if female is not None and female_path:
+                            export_stl(female, female_path)
+                            exported = f"{male_path} + {female_path}"
+                    else:
+                        exported = None
                 else:
                     model = build_stamp(settings)
-                if export_path:
-                    export_stl(model, export_path)
-                self.after(0, lambda: self._on_success(model, export_path, preview_only))
+                    exported = export_path
+                    if export_path:
+                        export_stl(model, export_path)
+                self.after(
+                    0,
+                    lambda: self._on_success(
+                        model, exported, preview_only, female_model=female
+                    ),
+                )
             except StampGenerationError as exc:
                 self.after(0, lambda: self._on_error(str(exc)))
             except Exception as exc:
@@ -828,8 +1220,15 @@ class StampDesignerApp(ctk.CTk):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_success(self, model, export_path: str | None, preview_only: bool) -> None:
+    def _on_success(
+        self,
+        model,
+        export_path: str | None,
+        preview_only: bool,
+        female_model=None,
+    ) -> None:
         self._model = model
+        self._female_model = female_model
         self._update_preview_plot(model)
         self._set_busy(False)
         if export_path:
