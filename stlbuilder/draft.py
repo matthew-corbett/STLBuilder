@@ -52,6 +52,8 @@ def collect_settings_dict(
     orientation: str = "horizontal",
     raised_border: bool = False,
     border_width: float = 1.5,
+    base_shape: str = "rect",
+    diameter_mm: float = 40.0,
     mold_shape: str = "rounded_rect",
     mold_length_mm: float = 180.0,
     mold_width_mm: float = 130.0,
@@ -76,6 +78,8 @@ def collect_settings_dict(
             "base_thickness": base_thickness,
             "margin": margin,
             "mirror_for_leather": mirror_for_leather,
+            "base_shape": base_shape,
+            "diameter_mm": diameter_mm,
         },
         "text": {
             "text": text,

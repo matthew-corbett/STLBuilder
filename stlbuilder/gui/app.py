@@ -17,6 +17,7 @@ from stlbuilder.draft import collect_settings_dict, load_draft, save_draft
 from stlbuilder.fonts import FontOption, list_system_fonts
 from stlbuilder.image_stamp import ImageStampSettings, build_image_stamp, preview_image_mask
 from stlbuilder.svg_stamp import is_svg_path
+from stlbuilder.geometry_utils import BASE_SHAPE_RECT, BASE_SHAPE_ROUND
 from stlbuilder.stamp_generator import (
     StampGenerationError,
     StampSettings,
@@ -461,8 +462,26 @@ class StampDesignerApp(ctk.CTk):
         )
         shared_row += 1
 
+        ctk.CTkLabel(self._shared_frame, text="Base shape").grid(
+            row=shared_row, column=0, sticky="w", pady=(10, 0)
+        )
+        shared_row += 1
+        self._base_shape = ctk.StringVar(value=BASE_SHAPE_RECT)
+        ctk.CTkSegmentedButton(
+            self._shared_frame,
+            values=[BASE_SHAPE_RECT, BASE_SHAPE_ROUND],
+            variable=self._base_shape,
+            command=self._on_base_shape_changed,
+        ).grid(row=shared_row, column=0, sticky="ew", pady=4)
+        shared_row += 1
+
         self._margin = self._labeled_slider(
             self._shared_frame, shared_row, "Border margin (mm)", 0, 20, 4
+        )
+        shared_row += 1
+
+        self._diameter = self._labeled_slider(
+            self._shared_frame, shared_row, "Stamp diameter (mm)", 15, 200, 40
         )
         shared_row += 1
 
@@ -488,10 +507,14 @@ class StampDesignerApp(ctk.CTk):
         )
         self._shared_hint.grid(row=shared_row, column=0, sticky="w", pady=4)
 
+        self._on_base_shape_changed(self._base_shape.get())
+
         self._bind_slider_refresh(self._threshold, self._refresh_image_preview)
         self._bind_slider_refresh(self._simplify, self._refresh_image_preview)
         self._bind_slider_refresh(self._stamp_width, self._refresh_image_preview)
         self._bind_slider_refresh(self._border_width, self._refresh_image_preview)
+        self._bind_slider_refresh(self._diameter, self._refresh_image_preview)
+        self._bind_slider_refresh(self._margin, self._refresh_image_preview)
         self._bind_slider_refresh(self._mold_threshold, self._refresh_mold_preview)
         self._bind_slider_refresh(self._mold_simplify, self._refresh_mold_preview)
         self._bind_slider_refresh(self._mold_target_width, self._refresh_mold_preview)
@@ -516,10 +539,12 @@ class StampDesignerApp(ctk.CTk):
         if mode == "text":
             self._text_frame.grid()
             self._shared_frame.grid()
+            self._on_base_shape_changed(self._base_shape.get())
         elif mode == "image":
             self._image_frame.grid()
             self._shared_frame.grid()
             self._update_image_controls_for_source()
+            self._on_base_shape_changed(self._base_shape.get())
             self._refresh_image_preview()
         else:
             self._mold_frame.grid()
@@ -542,6 +567,33 @@ class StampDesignerApp(ctk.CTk):
             corner_parent.grid()
         else:
             corner_parent.grid_remove()
+
+    def _on_base_shape_changed(self, shape: str) -> None:
+        diameter_frame = self._diameter.master
+        stamp_width_frame = self._stamp_width.master
+        if shape == BASE_SHAPE_ROUND:
+            diameter_frame.grid()
+            self._shared_hint.configure(
+                text=(
+                    "Round stamps use Stamp diameter as the total outer size. "
+                    "Border margin is the edge inset. Image artwork is scaled to "
+                    "fit inside the circle. Mirror flips the design for leather."
+                )
+            )
+            if self._mode.get() == "image":
+                stamp_width_frame.grid_remove()
+        else:
+            diameter_frame.grid_remove()
+            self._shared_hint.configure(
+                text=(
+                    "Raised areas extrude upward from the stamp face. "
+                    "Print with the design side up. Mirror flips the design so "
+                    "the leather impression reads normally."
+                )
+            )
+            if self._mode.get() == "image":
+                stamp_width_frame.grid()
+        self._refresh_image_preview()
 
     def _labeled_slider(
         self,
@@ -617,24 +669,37 @@ class StampDesignerApp(ctk.CTk):
             margin=self._slider_value(self._margin),
             mirror_for_leather=self._mirror_var.get(),
             orientation=self._orientation.get(),
+            base_shape=self._base_shape.get(),
+            diameter_mm=self._slider_value(self._diameter),
         )
 
     def _collect_image_settings(self) -> ImageStampSettings:
         if not self._image_path:
             raise StampGenerationError("Import an image to create an image stamp.")
 
+        base_shape = self._base_shape.get()
+        diameter = self._slider_value(self._diameter)
+        margin = self._slider_value(self._margin)
+        # Round: artwork width follows diameter; rect: use stamp width slider.
+        if base_shape == BASE_SHAPE_ROUND:
+            width_mm = max(1.0, diameter - 2.0 * margin)
+        else:
+            width_mm = self._slider_value(self._stamp_width)
+
         return ImageStampSettings(
             image_path=self._image_path,
-            width_mm=self._slider_value(self._stamp_width),
+            width_mm=width_mm,
             imprint_depth=self._slider_value(self._imprint_depth),
             base_thickness=self._slider_value(self._base_thickness),
-            margin=self._slider_value(self._margin),
+            margin=margin,
             mirror_for_leather=self._mirror_var.get(),
             threshold=int(round(self._slider_value(self._threshold))),
             invert=self._invert_var.get(),
             simplify=self._slider_value(self._simplify),
             raised_border=self._raised_border_var.get(),
             border_width=self._slider_value(self._border_width),
+            base_shape=base_shape,
+            diameter_mm=diameter,
         )
 
     def _collect_mold_settings(self) -> ValetMoldSettings:
@@ -843,7 +908,10 @@ class StampDesignerApp(ctk.CTk):
             orientation=self._orientation.get(),
             raised_border=self._raised_border_var.get(),
             border_width=self._slider_value(self._border_width),
+            base_shape=self._base_shape.get(),
+            diameter_mm=self._slider_value(self._diameter),
             mold_shape=self._mold_shape.get(),
+
             mold_length_mm=self._slider_value(self._mold_length),
             mold_width_mm=self._slider_value(self._mold_width),
             mold_height_mm=self._slider_value(self._mold_height),
@@ -1003,6 +1071,11 @@ class StampDesignerApp(ctk.CTk):
         self._set_slider(self._base_thickness, shared.get("base_thickness", 5.0))
         self._set_slider(self._margin, shared.get("margin", 4.0))
         self._mirror_var.set(bool(shared.get("mirror_for_leather", True)))
+        base_shape = shared.get("base_shape", BASE_SHAPE_RECT)
+        if base_shape not in (BASE_SHAPE_RECT, BASE_SHAPE_ROUND):
+            base_shape = BASE_SHAPE_RECT
+        self._base_shape.set(base_shape)
+        self._set_slider(self._diameter, shared.get("diameter_mm", 40.0))
 
         self._text.delete("1.0", "end")
         self._text.insert("1.0", text.get("text") or "")

@@ -10,8 +10,9 @@ Desktop app for designing **3D-printable leather stamps** and **valet-tray wet-f
 - **Font** — any installed Windows font, or load a custom `.ttf`
 - **Size** — letter height or mold footprint in millimeters
 - **Imprint depth** — how tall the raised letters are (how deep they press into leather)
-- **Base** — plate thickness and border margin around stamp text
+- **Base** — rectangular or **round** plate; round stamps use an arbitrary **diameter** (mm)
 - **Mirror** — flip stamp text so the leather impression reads correctly
+
 - **3D preview** — rotate-friendly view before export
 - **STL export** — ready for FDM/resin printing
 
@@ -59,9 +60,10 @@ Distribute either the whole `dist\STLBuilder` folder (portable) or the `STLBuild
 
 1. Choose **text** mode and enter your stamp text (use **Enter** for a second line).
 2. Pick **horizontal** or **vertical** text direction (vertical stacks each letter top-to-bottom).
-3. Pick a **font** and adjust **font size**, **imprint depth**, **base thickness**, and **margin**.
-4. Leave **Mirror design** enabled so the stamped leather reads normally.
-5. Click **Update Preview**, then **Export STL…**.
+3. Pick a **font** and adjust **font size**, **imprint depth**, and **base thickness**.
+4. Choose **Base shape** `rect` or `round`. For round stamps, set **Stamp diameter** to the total outer size (mm); **Border margin** is the edge inset.
+5. Leave **Mirror design** enabled so the stamped leather reads normally.
+6. Click **Update Preview**, then **Export STL…**.
 
 ### Image / SVG stamp
 
@@ -69,7 +71,8 @@ Distribute either the whole `dist\STLBuilder` folder (portable) or the `STLBuild
 2. For **raster** images: adjust **stamp width**, **threshold**, and **edge simplify (%)** (~**0.08** is a good default). For **SVG**: paths are imported as vectors (threshold/simplify are hidden).
 3. Use **Invert** if you need light areas / background raised instead of the filled shapes.
 4. Enable **Raised border around image** to add a rectangular frame outside the artwork (adjust **border width** as needed).
-5. Set **imprint depth**, **base**, and **margin**, then preview and export.
+5. Set **imprint depth** and **base**. For **round** bases, set **Stamp diameter** (total size); artwork is scaled to fit inside the circle. For **rect**, use **Stamp width** and **Border margin**.
+6. Preview and export.
 
 Silhouettes are merged before extrusion and ring vertex counts are capped so complex seals stay fast. Curves still use denser sampling than CadQuery’s defaults.
 

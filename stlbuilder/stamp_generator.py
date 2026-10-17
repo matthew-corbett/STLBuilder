@@ -8,7 +8,13 @@ from pathlib import Path
 import cadquery as cq
 
 from stlbuilder.fonts import resolve_font
-from stlbuilder.geometry_utils import apply_mirror, build_base_plate
+from stlbuilder.geometry_utils import (
+    BASE_SHAPE_RECT,
+    BASE_SHAPE_ROUND,
+    VALID_BASE_SHAPES,
+    apply_mirror,
+    build_stamp_base,
+)
 
 
 @dataclass
@@ -22,6 +28,8 @@ class StampSettings:
     margin: float = 4.0
     mirror_for_leather: bool = True
     orientation: str = "horizontal"  # "horizontal" | "vertical"
+    base_shape: str = BASE_SHAPE_RECT  # "rect" | "round"
+    diameter_mm: float = 40.0  # total outer diameter when base_shape == "round"
     # Stamp face at Z=0; letters extrude +Z; base extends -Z
 
 
@@ -73,6 +81,10 @@ def _validate_settings(settings: StampSettings) -> None:
         raise StampGenerationError("Base thickness must be greater than zero.")
     if settings.margin < 0:
         raise StampGenerationError("Margin cannot be negative.")
+    if settings.base_shape not in VALID_BASE_SHAPES:
+        raise StampGenerationError("Base shape must be rect or round.")
+    if settings.base_shape == BASE_SHAPE_ROUND and settings.diameter_mm <= 0:
+        raise StampGenerationError("Stamp diameter must be greater than zero.")
 
 
 def build_stamp(settings: StampSettings) -> cq.Workplane:
@@ -113,8 +125,30 @@ def build_stamp(settings: StampSettings) -> cq.Workplane:
     if bb.xlen <= 0 or bb.ylen <= 0:
         raise StampGenerationError("Text bounds are invalid.")
 
-    margin = settings.margin
-    base = build_base_plate(bb, margin, settings.base_thickness)
+    # Pin text to origin so round/rect bases share the same center.
+    dx = -bb.center.x
+    dy = -bb.center.y
+    if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+        text_wp = text_wp.translate((dx, dy, 0))
+        solid = text_wp.val()
+        if solid is None:
+            raise StampGenerationError("Text produced no geometry. Check font and characters.")
+        bb = solid.BoundingBox()
+
+    try:
+        base = build_stamp_base(
+            bb,
+            base_thickness=settings.base_thickness,
+            base_shape=settings.base_shape,
+            margin=settings.margin,
+            diameter_mm=(
+                settings.diameter_mm
+                if settings.base_shape == BASE_SHAPE_ROUND
+                else None
+            ),
+        )
+    except ValueError as exc:
+        raise StampGenerationError(str(exc)) from exc
 
     # Letters sit on top of the base (base top face at Z=0).
     return base.union(text_wp)
