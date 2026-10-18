@@ -25,6 +25,16 @@ def build_base_plate(
     )
 
 
+def _max_radius_from_origin(bb: cq.BoundBox) -> float:
+    """Largest distance from origin to a corner of the XY bounding box."""
+    return max(
+        math.hypot(bb.xmin, bb.ymin),
+        math.hypot(bb.xmin, bb.ymax),
+        math.hypot(bb.xmax, bb.ymin),
+        math.hypot(bb.xmax, bb.ymax),
+    )
+
+
 def build_stamp_base(
     bb: cq.BoundBox,
     *,
@@ -33,7 +43,12 @@ def build_stamp_base(
     margin: float = 4.0,
     diameter_mm: float | None = None,
 ) -> cq.Workplane:
-    """Create a stamp base with top face at Z=0, centered on the relief bounds."""
+    """Create a stamp base with top face at Z=0, always centered on the origin.
+
+    Relief artwork is expected to already be positioned about (0, 0). The base
+    is sized to cover the relief extents (plus margin) without shifting the
+    visual center of asymmetric logos.
+    """
     shape = (base_shape or BASE_SHAPE_RECT).lower()
     if shape not in VALID_BASE_SHAPES:
         raise ValueError(f"Unknown base shape '{base_shape}'. Use rect or round.")
@@ -44,22 +59,24 @@ def build_stamp_base(
         if diameter_mm is not None and diameter_mm > 0:
             diameter = float(diameter_mm)
         else:
-            diameter = max(bb.xlen, bb.ylen) + 2 * max(0.0, margin)
+            diameter = 2.0 * _max_radius_from_origin(bb) + 2 * max(0.0, margin)
         if diameter <= 0:
             raise ValueError("Stamp diameter must be greater than zero.")
 
-        # Ensure the circular plate actually covers the relief.
-        needed = math.hypot(bb.xlen, bb.ylen)
-        if needed > diameter + 1e-6:
+        # Axis extents only — AABB corners of pointed logos (shields) sit outside
+        # the real silhouette and would falsely fail a corner-radius check.
+        half_extent = max(
+            abs(bb.xmin), abs(bb.xmax), abs(bb.ymin), abs(bb.ymax)
+        )
+        if half_extent > diameter / 2.0 + 0.05:
             raise ValueError(
                 f"Design is too large for a {diameter:.1f} mm round stamp "
-                f"(needs about {needed:.1f} mm across the corners). "
+                f"(extends about {2.0 * half_extent:.1f} mm). "
                 "Increase diameter, reduce size, or add less margin."
             )
 
         return (
             cq.Workplane("XY")
-            .center(bb.center.x, bb.center.y)
             .circle(diameter / 2.0)
             .extrude(base_thickness)
             .translate((0, 0, -base_thickness))
@@ -67,14 +84,16 @@ def build_stamp_base(
 
     if margin < 0:
         raise ValueError("Margin cannot be negative.")
+    half_x = max(abs(bb.xmin), abs(bb.xmax))
+    half_y = max(abs(bb.ymin), abs(bb.ymax))
     return (
         cq.Workplane("XY")
         .box(
-            bb.xlen + 2 * margin,
-            bb.ylen + 2 * margin,
+            2.0 * half_x + 2 * margin,
+            2.0 * half_y + 2 * margin,
             base_thickness,
         )
-        .translate((bb.center.x, bb.center.y, -base_thickness / 2))
+        .translate((0, 0, -base_thickness / 2))
     )
 
 
@@ -86,6 +105,7 @@ def round_content_width_mm(
     """Max artwork width that fits a circle of diameter_mm with edge inset margin.
 
     Uses the bounding-box diagonal so rectangular artwork stays inside the disk.
+    Prefer circumradius fitting via scale_polygons for round stamps when possible.
     """
     usable = max(1.0, float(diameter_mm) - 2.0 * max(0.0, float(margin)))
     aspect = max(1e-6, abs(float(aspect_h_over_w)))

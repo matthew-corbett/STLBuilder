@@ -1207,12 +1207,18 @@ class StampDesignerApp(ctk.CTk):
         extents = np.where(extents < 1e-9, 1.0, extents)
         self._ax.set_box_aspect(extents)
 
-        mins = verts.min(axis=0)
-        maxs = verts.max(axis=0)
-        pad = 0.02 * extents
-        self._ax.set_xlim(mins[0] - pad[0], maxs[0] + pad[0])
-        self._ax.set_ylim(mins[1] - pad[1], maxs[1] + pad[1])
-        self._ax.set_zlim(mins[2] - pad[2], maxs[2] + pad[2])
+        # Symmetric XY limits around 0 so round stamps read as centered circles
+        # (asymmetric logo mass no longer shifts the whole plot frame).
+        half_x = max(abs(float(verts[:, 0].min())), abs(float(verts[:, 0].max())))
+        half_y = max(abs(float(verts[:, 1].min())), abs(float(verts[:, 1].max())))
+        pad_x = 0.02 * max(half_x, 1.0)
+        pad_y = 0.02 * max(half_y, 1.0)
+        self._ax.set_xlim(-half_x - pad_x, half_x + pad_x)
+        self._ax.set_ylim(-half_y - pad_y, half_y + pad_y)
+        zmin = float(verts[:, 2].min())
+        zmax = float(verts[:, 2].max())
+        zpad = 0.02 * max(zmax - zmin, 1.0)
+        self._ax.set_zlim(zmin - zpad, zmax + zpad)
 
         self._azim = getattr(self, "_azim", 45)
         self._elev = getattr(self, "_elev", 28)

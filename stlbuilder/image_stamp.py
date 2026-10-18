@@ -274,14 +274,36 @@ def _content_bounds(
         return None
 
 
+def _content_centroid(polygons: list[Polygon]) -> tuple[float, float] | None:
+    """Area-weighted centroid of merged ink (better visual center than bbox)."""
+    if not polygons:
+        return None
+    try:
+        merged = unary_union(polygons)
+        if merged.is_empty:
+            return None
+        return float(merged.centroid.x), float(merged.centroid.y)
+    except Exception:
+        return None
+
+
+def _max_radius_about(
+    polygons: list[Polygon], cx: float, cy: float
+) -> float:
+    """Furthest exterior vertex distance from (cx, cy)."""
+    radius = 0.0
+    for poly in polygons:
+        if poly.is_empty:
+            continue
+        for x, y in poly.exterior.coords:
+            radius = max(radius, math.hypot(float(x) - cx, float(y) - cy))
+    return radius
+
+
 def _scale_polygons(
     polygons: list[Polygon], width_mm: float, mask_shape: tuple[int, int]
 ) -> list[Polygon]:
-    """Scale polygons to width_mm and center the *content* on the origin.
-
-    Uses the ink bounding box (not the full image canvas) so logos with
-    padding or transparent margins land in the middle of the stamp.
-    """
+    """Scale polygons to width_mm and center the *content* on the origin."""
     scaled, _height = _scale_polygons_centered(polygons, width_mm, mask_shape)
     return scaled
 
@@ -290,18 +312,25 @@ def _scale_polygons_centered(
     polygons: list[Polygon],
     width_mm: float,
     mask_shape: tuple[int, int] | None = None,
+    *,
+    target_radius_mm: float | None = None,
 ) -> tuple[list[Polygon], float]:
-    """Scale to width_mm, center content on origin. Returns (polygons, height_mm)."""
-    if not polygons or width_mm <= 0:
+    """Scale artwork and pin its visual center (centroid) to the origin.
+
+    For round stamps, pass target_radius_mm so the logo is scaled by its
+    circumradius about the centroid (fits the disk without looking top-heavy).
+    Returns (polygons, height_mm of axis-aligned bounds after scaling).
+    """
+    if not polygons:
         return [], 0.0
 
+    centroid = _content_centroid(polygons)
     bounds = _content_bounds(polygons)
-    if bounds is not None:
+    if centroid is not None and bounds is not None:
+        cx, cy = centroid
         minx, miny, maxx, maxy = bounds
         content_w = maxx - minx
         content_h = maxy - miny
-        cx = 0.5 * (minx + maxx)
-        cy = 0.5 * (miny + maxy)
     elif mask_shape is not None:
         img_h, img_w = mask_shape
         if img_w <= 0 or img_h <= 0:
@@ -313,7 +342,16 @@ def _scale_polygons_centered(
     else:
         return [], 0.0
 
-    scale = width_mm / content_w
+    if target_radius_mm is not None and target_radius_mm > 0:
+        src_radius = _max_radius_about(polygons, cx, cy)
+        if src_radius <= 1e-9:
+            return [], 0.0
+        scale = float(target_radius_mm) / src_radius
+    else:
+        if width_mm <= 0 or content_w <= 1e-9:
+            return [], 0.0
+        scale = width_mm / content_w
+
     height_mm = content_h * scale
     scaled: list[Polygon] = []
     for poly in polygons:
@@ -907,6 +945,44 @@ def _artwork_width_mm(settings: ImageStampSettings, aspect_h_over_w: float) -> f
     return settings.width_mm
 
 
+def _prepare_stamp_polygons(
+    polygons: list[Polygon],
+    settings: ImageStampSettings,
+    mask_shape: tuple[int, int] | None = None,
+) -> tuple[list[Polygon], float]:
+    """Scale/center polygons for the stamp; round uses centroid + circumradius."""
+    if settings.base_shape == BASE_SHAPE_ROUND:
+        target_r = max(0.5, settings.diameter_mm / 2.0 - max(0.0, settings.margin))
+        return _scale_polygons_centered(
+            polygons,
+            settings.width_mm,
+            mask_shape,
+            target_radius_mm=target_r,
+        )
+
+    bounds = _content_bounds(polygons)
+    if bounds is not None:
+        minx, miny, maxx, maxy = bounds
+        aspect = (maxy - miny) / max(maxx - minx, 1e-9)
+    elif mask_shape is not None and mask_shape[1] > 0:
+        aspect = mask_shape[0] / mask_shape[1]
+    else:
+        aspect = 1.0
+    art_width = _artwork_width_mm(settings, aspect)
+    return _scale_polygons_centered(polygons, art_width, mask_shape)
+
+
+def _canvas_size_mm(
+    polygons: list[Polygon], fallback_height_mm: float
+) -> tuple[float, float]:
+    """Axis-aligned canvas size after scaling (for optional raised borders)."""
+    bounds = _content_bounds(polygons)
+    if bounds is None:
+        return max(1.0, fallback_height_mm), max(1.0, fallback_height_mm)
+    minx, miny, maxx, maxy = bounds
+    return max(1.0, maxx - minx), max(1.0, maxy - miny)
+
+
 def _union_relief(parts: list[cq.Workplane]) -> cq.Workplane:
     if len(parts) == 1:
         return parts[0]
@@ -929,34 +1005,16 @@ def _union_relief(parts: list[cq.Workplane]) -> cq.Workplane:
         return relief
 
 
-def _recenter_relief(relief: cq.Workplane) -> tuple[cq.Workplane, cq.BoundBox]:
-    """Translate relief so its bounding-box center sits at the origin."""
-    solid = relief.val()
-    if solid is None:
-        raise StampGenerationError("Image relief produced no geometry.")
-    bb = solid.BoundingBox()
-    if bb.xlen <= 0 or bb.ylen <= 0:
-        raise StampGenerationError("Image bounds are invalid.")
-    dx = -bb.center.x
-    dy = -bb.center.y
-    if abs(dx) > 1e-9 or abs(dy) > 1e-9:
-        relief = relief.translate((dx, dy, 0))
-        solid = relief.val()
-        if solid is None:
-            raise StampGenerationError("Image relief produced no geometry.")
-        bb = solid.BoundingBox()
-    return relief, bb
-
-
 def _finish_stamp(
     relief: cq.Workplane,
     settings: ImageStampSettings,
     canvas_width_mm: float,
     canvas_height_mm: float,
 ) -> cq.Workplane:
-    # Mirror first, then pin content to origin so the base / round rim share center.
+    # Artwork is already centroid-centered at the origin. Mirror keeps that center.
+    # Do NOT re-center on the bounding box — that pulls pointed logos (shields)
+    # upward on the stamp and misaligns the round base.
     relief = apply_mirror(relief, settings.mirror_for_leather)
-    relief, bb = _recenter_relief(relief)
 
     if settings.raised_border:
         if settings.base_shape == BASE_SHAPE_ROUND:
@@ -974,7 +1032,13 @@ def _finish_stamp(
             )
         if frame is not None:
             relief = relief.union(frame)
-            relief, bb = _recenter_relief(relief)
+
+    solid = relief.val()
+    if solid is None:
+        raise StampGenerationError("Image relief produced no geometry.")
+    bb = solid.BoundingBox()
+    if bb.xlen <= 0 or bb.ylen <= 0:
+        raise StampGenerationError("Image bounds are invalid.")
 
     try:
         base = build_stamp_base(
@@ -993,6 +1057,27 @@ def _finish_stamp(
     return base.union(relief)
 
 
+def _finalize_polygons_for_stamp(
+    polygons: list[Polygon],
+    settings: ImageStampSettings,
+) -> tuple[list[Polygon], float]:
+    """Run after smoothing: pin centroid to origin and fit round stamps to diameter."""
+    if not polygons:
+        return [], 0.0
+    if settings.base_shape == BASE_SHAPE_ROUND:
+        target_r = max(0.5, settings.diameter_mm / 2.0 - max(0.0, settings.margin))
+        return _scale_polygons_centered(
+            polygons, settings.width_mm, target_radius_mm=target_r
+        )
+    # Rect: keep size, re-center on centroid in case smoothing drifted.
+    bounds = _content_bounds(polygons)
+    if bounds is None:
+        return polygons, settings.width_mm
+    minx, miny, maxx, maxy = bounds
+    width = max(maxx - minx, 1e-6)
+    return _scale_polygons_centered(polygons, width)
+
+
 def _build_from_svg(settings: ImageStampSettings) -> cq.Workplane:
     polygons, src_w, src_h = svg_to_polygons(settings.image_path)
     if settings.invert:
@@ -1001,18 +1086,10 @@ def _build_from_svg(settings: ImageStampSettings) -> cq.Workplane:
             raise StampGenerationError("Invert left no shapes to extrude.")
 
     polygons = flip_y_polygons(polygons, src_h)
-    bounds = _content_bounds(polygons)
-    if bounds is not None:
-        minx, miny, maxx, maxy = bounds
-        aspect = (maxy - miny) / max(maxx - minx, 1e-9)
-    else:
-        aspect = (src_h / src_w) if src_w > 0 else 1.0
-    art_width = _artwork_width_mm(settings, aspect)
-    # Center on ink bounds (not the SVG viewBox) so padded logos sit in the middle.
-    polygons, height_mm = _scale_polygons_centered(
-        polygons, art_width, mask_shape=(src_h, src_w)
+    # Working scale so smooth chord lengths are in mm.
+    polygons, _ = _prepare_stamp_polygons(
+        polygons, settings, mask_shape=(int(src_h), int(src_w))
     )
-
 
     polygons = _smooth_polygons(
         polygons,
@@ -1031,6 +1108,7 @@ def _build_from_svg(settings: ImageStampSettings) -> cq.Workplane:
         max_hole=max(80, settings.letter_max_points // 2),
         min_hole_area_mm2=settings.min_hole_area_mm2,
     )
+    polygons, height_mm = _finalize_polygons_for_stamp(polygons, settings)
 
     relief_parts: list[cq.Workplane] = []
     for poly in polygons:
@@ -1041,8 +1119,9 @@ def _build_from_svg(settings: ImageStampSettings) -> cq.Workplane:
     if not relief_parts:
         raise StampGenerationError("Could not extrude SVG shapes.")
 
+    canvas_w, canvas_h = _canvas_size_mm(polygons, height_mm)
     return _finish_stamp(
-        _union_relief(relief_parts), settings, art_width, height_mm
+        _union_relief(relief_parts), settings, canvas_w, canvas_h
     )
 
 
@@ -1056,16 +1135,8 @@ def _build_from_raster(settings: ImageStampSettings) -> cq.Workplane:
             "No stamp shapes found. Adjust threshold/invert or use a higher-contrast image."
         )
 
-    # Scale/center on ink bounds (not full canvas) so padded logos sit in the middle.
-    bounds = _content_bounds(polygons)
-    if bounds is not None:
-        minx, miny, maxx, maxy = bounds
-        aspect = (maxy - miny) / max(maxx - minx, 1e-9)
-    else:
-        img_h, img_w = mask.shape
-        aspect = (img_h / img_w) if img_w > 0 else 1.0
-    art_width = _artwork_width_mm(settings, aspect)
-    polygons, height_mm = _scale_polygons_centered(polygons, art_width, mask.shape)
+    # Working scale so smooth chord lengths are in mm.
+    polygons, _ = _prepare_stamp_polygons(polygons, settings, mask_shape=mask.shape)
 
     polygons = _smooth_polygons(
         polygons,
@@ -1085,6 +1156,9 @@ def _build_from_raster(settings: ImageStampSettings) -> cq.Workplane:
         max_hole=max(80, settings.letter_max_points // 2),
         min_hole_area_mm2=settings.min_hole_area_mm2,
     )
+    # Final centroid + circumradius fit (after smooth, which can expand edges).
+    polygons, height_mm = _finalize_polygons_for_stamp(polygons, settings)
+
     relief_parts: list[cq.Workplane] = []
     for poly in polygons:
         part = _extrude_polygon(poly, settings.imprint_depth)
@@ -1094,8 +1168,9 @@ def _build_from_raster(settings: ImageStampSettings) -> cq.Workplane:
     if not relief_parts:
         raise StampGenerationError("Could not extrude image shapes.")
 
+    canvas_w, canvas_h = _canvas_size_mm(polygons, height_mm)
     return _finish_stamp(
-        _union_relief(relief_parts), settings, art_width, height_mm
+        _union_relief(relief_parts), settings, canvas_w, canvas_h
     )
 
 

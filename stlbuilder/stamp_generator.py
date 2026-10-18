@@ -125,7 +125,7 @@ def build_stamp(settings: StampSettings) -> cq.Workplane:
     if bb.xlen <= 0 or bb.ylen <= 0:
         raise StampGenerationError("Text bounds are invalid.")
 
-    # Pin text to origin so round/rect bases share the same center.
+    # Pin text bbox center to origin; base is always built at the origin.
     dx = -bb.center.x
     dy = -bb.center.y
     if abs(dx) > 1e-9 or abs(dy) > 1e-9:
