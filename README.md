@@ -61,7 +61,7 @@ Distribute either the whole `dist\STLBuilder` folder (portable) or the `STLBuild
 1. Choose **text** mode and enter your stamp text (use **Enter** for a second line).
 2. Pick **horizontal** or **vertical** text direction (vertical stacks each letter top-to-bottom).
 3. Pick a **font** and adjust **font size**, **imprint depth**, and **base thickness**.
-4. Choose **Base shape** `rect` or `round`. For round stamps, set **Stamp diameter** to the total outer size (mm); **Border margin** is the edge inset.
+4. Choose **Base shape** `rect` or `round`. For round stamps, set **Stamp diameter** to the total outer size (mm); **Border margin** is the edge inset. Optionally enable **Back orientation tick** — a raised mark on the stamp back at the top edge so you can feel which way is up.
 5. Leave **Mirror design** enabled so the stamped leather reads normally.
 6. Click **Update Preview**, then **Export STL…**.
 
@@ -72,7 +72,8 @@ Distribute either the whole `dist\STLBuilder` folder (portable) or the `STLBuild
 3. Use **Invert** if you need light areas / background raised instead of the filled shapes.
 4. Enable **Raised border around image** to add a rectangular frame outside the artwork (adjust **border width** as needed).
 5. Set **imprint depth** and **base**. For **round** bases, set **Stamp diameter** (total size); artwork is scaled to fit inside the circle. For **rect**, use **Stamp width** and **Border margin**.
-6. Preview and export.
+6. **Artwork center**: `bounds` (default) uses the box center — best for seals like Corbett. `centroid` uses mass center — better for pointed shields (West Point).
+7. Preview and export.
 
 Silhouettes are merged before extrusion and ring vertex counts are capped so complex seals stay fast. Curves still use denser sampling than CadQuery’s defaults.
 

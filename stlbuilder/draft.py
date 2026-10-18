@@ -54,7 +54,11 @@ def collect_settings_dict(
     border_width: float = 1.5,
     base_shape: str = "rect",
     diameter_mm: float = 40.0,
+    center_mode: str = "bounds",
+    back_tick: bool = False,
     mold_shape: str = "rounded_rect",
+
+
     mold_length_mm: float = 180.0,
     mold_width_mm: float = 130.0,
     mold_height_mm: float = 18.0,
@@ -80,6 +84,8 @@ def collect_settings_dict(
             "mirror_for_leather": mirror_for_leather,
             "base_shape": base_shape,
             "diameter_mm": diameter_mm,
+            "center_mode": center_mode,
+            "back_tick": back_tick,
         },
         "text": {
             "text": text,

@@ -16,7 +16,10 @@ from shapely.ops import unary_union
 from stlbuilder.geometry_utils import (
     BASE_SHAPE_RECT,
     BASE_SHAPE_ROUND,
+    CENTER_BOUNDS,
+    CENTER_CENTROID,
     VALID_BASE_SHAPES,
+    VALID_CENTER_MODES,
     apply_mirror,
     build_stamp_base,
     round_content_width_mm,
@@ -48,6 +51,9 @@ class ImageStampSettings:
     border_width: float = 1.5
     base_shape: str = BASE_SHAPE_RECT  # "rect" | "round"
     diameter_mm: float = 40.0  # total outer diameter when round
+    # "bounds" = bounding-box center (better for seals); "centroid" = mass center (shields).
+    center_mode: str = CENTER_BOUNDS
+    back_tick: bool = False  # raised orientation mark on round stamp back (+Y)
 
     # Soften pixel stair-steps on raster silhouettes before contouring (odd px, 0=off).
     edge_smooth_px: int = 3
@@ -87,6 +93,8 @@ def _validate_settings(settings: ImageStampSettings) -> None:
         raise StampGenerationError("Base shape must be rect or round.")
     if settings.base_shape == BASE_SHAPE_ROUND and settings.diameter_mm <= 0:
         raise StampGenerationError("Stamp diameter must be greater than zero.")
+    if settings.center_mode not in VALID_CENTER_MODES:
+        raise StampGenerationError("Center mode must be bounds or centroid.")
 
 
 def _load_grayscale_array(path: str, max_pixels: int) -> np.ndarray:
@@ -304,7 +312,9 @@ def _scale_polygons(
     polygons: list[Polygon], width_mm: float, mask_shape: tuple[int, int]
 ) -> list[Polygon]:
     """Scale polygons to width_mm and center the *content* on the origin."""
-    scaled, _height = _scale_polygons_centered(polygons, width_mm, mask_shape)
+    scaled, _height = _scale_polygons_centered(
+        polygons, width_mm, mask_shape, center_mode=CENTER_BOUNDS
+    )
     return scaled
 
 
@@ -314,23 +324,36 @@ def _scale_polygons_centered(
     mask_shape: tuple[int, int] | None = None,
     *,
     target_radius_mm: float | None = None,
+    center_mode: str = CENTER_BOUNDS,
 ) -> tuple[list[Polygon], float]:
-    """Scale artwork and pin its visual center (centroid) to the origin.
+    """Scale artwork and pin its center to the origin.
+
+    center_mode:
+      - bounds: axis-aligned bounding-box center (seals, balanced logos)
+      - centroid: area-weighted center (pointed shields sit lower)
 
     For round stamps, pass target_radius_mm so the logo is scaled by its
-    circumradius about the centroid (fits the disk without looking top-heavy).
-    Returns (polygons, height_mm of axis-aligned bounds after scaling).
+    circumradius about that center. Returns (polygons, height_mm).
     """
     if not polygons:
         return [], 0.0
 
-    centroid = _content_centroid(polygons)
+    mode = (center_mode or CENTER_BOUNDS).lower()
+    if mode not in VALID_CENTER_MODES:
+        mode = CENTER_BOUNDS
+
     bounds = _content_bounds(polygons)
-    if centroid is not None and bounds is not None:
-        cx, cy = centroid
+    centroid = _content_centroid(polygons) if mode == CENTER_CENTROID else None
+
+    if bounds is not None:
         minx, miny, maxx, maxy = bounds
         content_w = maxx - minx
         content_h = maxy - miny
+        if mode == CENTER_CENTROID and centroid is not None:
+            cx, cy = centroid
+        else:
+            cx = 0.5 * (minx + maxx)
+            cy = 0.5 * (miny + maxy)
     elif mask_shape is not None:
         img_h, img_w = mask_shape
         if img_w <= 0 or img_h <= 0:
@@ -950,7 +973,8 @@ def _prepare_stamp_polygons(
     settings: ImageStampSettings,
     mask_shape: tuple[int, int] | None = None,
 ) -> tuple[list[Polygon], float]:
-    """Scale/center polygons for the stamp; round uses centroid + circumradius."""
+    """Scale/center polygons for the stamp; round uses circumradius about center."""
+    center_mode = settings.center_mode
     if settings.base_shape == BASE_SHAPE_ROUND:
         target_r = max(0.5, settings.diameter_mm / 2.0 - max(0.0, settings.margin))
         return _scale_polygons_centered(
@@ -958,6 +982,7 @@ def _prepare_stamp_polygons(
             settings.width_mm,
             mask_shape,
             target_radius_mm=target_r,
+            center_mode=center_mode,
         )
 
     bounds = _content_bounds(polygons)
@@ -969,7 +994,9 @@ def _prepare_stamp_polygons(
     else:
         aspect = 1.0
     art_width = _artwork_width_mm(settings, aspect)
-    return _scale_polygons_centered(polygons, art_width, mask_shape)
+    return _scale_polygons_centered(
+        polygons, art_width, mask_shape, center_mode=center_mode
+    )
 
 
 def _canvas_size_mm(
@@ -1051,6 +1078,7 @@ def _finish_stamp(
                 if settings.base_shape == BASE_SHAPE_ROUND
                 else None
             ),
+            back_tick=settings.back_tick and settings.base_shape == BASE_SHAPE_ROUND,
         )
     except ValueError as exc:
         raise StampGenerationError(str(exc)) from exc
@@ -1061,21 +1089,25 @@ def _finalize_polygons_for_stamp(
     polygons: list[Polygon],
     settings: ImageStampSettings,
 ) -> tuple[list[Polygon], float]:
-    """Run after smoothing: pin centroid to origin and fit round stamps to diameter."""
+    """Run after smoothing: re-center and fit round stamps to diameter."""
     if not polygons:
         return [], 0.0
+    center_mode = settings.center_mode
     if settings.base_shape == BASE_SHAPE_ROUND:
         target_r = max(0.5, settings.diameter_mm / 2.0 - max(0.0, settings.margin))
         return _scale_polygons_centered(
-            polygons, settings.width_mm, target_radius_mm=target_r
+            polygons,
+            settings.width_mm,
+            target_radius_mm=target_r,
+            center_mode=center_mode,
         )
-    # Rect: keep size, re-center on centroid in case smoothing drifted.
+    # Rect: keep size, re-center in case smoothing drifted.
     bounds = _content_bounds(polygons)
     if bounds is None:
         return polygons, settings.width_mm
     minx, miny, maxx, maxy = bounds
     width = max(maxx - minx, 1e-6)
-    return _scale_polygons_centered(polygons, width)
+    return _scale_polygons_centered(polygons, width, center_mode=center_mode)
 
 
 def _build_from_svg(settings: ImageStampSettings) -> cq.Workplane:

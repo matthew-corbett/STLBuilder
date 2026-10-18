@@ -10,6 +10,12 @@ BASE_SHAPE_RECT = "rect"
 BASE_SHAPE_ROUND = "round"
 VALID_BASE_SHAPES = (BASE_SHAPE_RECT, BASE_SHAPE_ROUND)
 
+# Image artwork centering: bounds = AABB center (seals/logos);
+# centroid = area-weighted center (pointed shields).
+CENTER_BOUNDS = "bounds"
+CENTER_CENTROID = "centroid"
+VALID_CENTER_MODES = (CENTER_BOUNDS, CENTER_CENTROID)
+
 
 def build_base_plate(
     bb: cq.BoundBox,
@@ -35,6 +41,37 @@ def _max_radius_from_origin(bb: cq.BoundBox) -> float:
     )
 
 
+def _back_orientation_tick(
+    diameter_mm: float,
+    base_thickness: float,
+    *,
+    tick_length_mm: float = 4.0,
+    tick_width_mm: float = 2.5,
+    tick_height_mm: float = 1.2,
+    edge_inset_mm: float = 1.5,
+) -> cq.Workplane:
+    """Raised tick on the stamp back (+Y) so you can feel which way is up.
+
+    Stamp face is at Z=0 (design +Z); base fills Z in [-base_thickness, 0].
+    The tick sits on the back face and protrudes further in -Z, near the +Y rim
+    (top of the design).
+    """
+    radius = diameter_mm / 2.0
+    length = min(tick_length_mm, max(2.0, radius * 0.35))
+    width = min(tick_width_mm, max(1.5, radius * 0.2))
+    height = min(tick_height_mm, max(0.6, base_thickness * 0.35))
+    inset = max(0.8, edge_inset_mm)
+    # Center of the tick, inset from the +Y rim toward the origin.
+    y = radius - inset - length / 2.0
+    if y < length / 2.0:
+        y = length / 2.0
+    return (
+        cq.Workplane("XY")
+        .box(width, length, height)
+        .translate((0.0, y, -base_thickness - height / 2.0))
+    )
+
+
 def build_stamp_base(
     bb: cq.BoundBox,
     *,
@@ -42,6 +79,7 @@ def build_stamp_base(
     base_shape: str = BASE_SHAPE_RECT,
     margin: float = 4.0,
     diameter_mm: float | None = None,
+    back_tick: bool = False,
 ) -> cq.Workplane:
     """Create a stamp base with top face at Z=0, always centered on the origin.
 
@@ -75,12 +113,20 @@ def build_stamp_base(
                 "Increase diameter, reduce size, or add less margin."
             )
 
-        return (
+        base = (
             cq.Workplane("XY")
             .circle(diameter / 2.0)
             .extrude(base_thickness)
             .translate((0, 0, -base_thickness))
         )
+        if back_tick:
+            try:
+                base = base.union(
+                    _back_orientation_tick(diameter, base_thickness)
+                )
+            except Exception:
+                pass
+        return base
 
     if margin < 0:
         raise ValueError("Margin cannot be negative.")

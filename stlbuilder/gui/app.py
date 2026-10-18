@@ -17,7 +17,12 @@ from stlbuilder.draft import collect_settings_dict, load_draft, save_draft
 from stlbuilder.fonts import FontOption, list_system_fonts
 from stlbuilder.image_stamp import ImageStampSettings, build_image_stamp, preview_image_mask
 from stlbuilder.svg_stamp import is_svg_path
-from stlbuilder.geometry_utils import BASE_SHAPE_RECT, BASE_SHAPE_ROUND
+from stlbuilder.geometry_utils import (
+    BASE_SHAPE_RECT,
+    BASE_SHAPE_ROUND,
+    CENTER_BOUNDS,
+    CENTER_CENTROID,
+)
 from stlbuilder.stamp_generator import (
     StampGenerationError,
     StampSettings,
@@ -153,12 +158,14 @@ class StampDesignerApp(ctk.CTk):
         font_names = [f.display_name for f in self._fonts]
         default_idx = font_names.index("Arial") if "Arial" in font_names else 0
         self._font_var = ctk.StringVar(value=font_names[default_idx])
-        self._font_menu = ctk.CTkOptionMenu(
+        # ComboBox dropdown scrolls with the mouse wheel; typing jumps to a name.
+        self._font_menu = ctk.CTkComboBox(
             self._text_frame,
             variable=self._font_var,
             values=font_names,
             width=280,
             command=self._on_font_selected,
+            state="normal",
         )
         self._font_menu.grid(row=text_row, column=0, sticky="ew", pady=4)
         text_row += 1
@@ -485,6 +492,42 @@ class StampDesignerApp(ctk.CTk):
         )
         shared_row += 1
 
+        self._back_tick_var = ctk.BooleanVar(value=False)
+        self._back_tick_check = ctk.CTkCheckBox(
+            self._shared_frame,
+            text="Back orientation tick (top)",
+            variable=self._back_tick_var,
+        )
+        self._back_tick_check.grid(row=shared_row, column=0, sticky="w", pady=4)
+        shared_row += 1
+
+        self._center_mode_label = ctk.CTkLabel(
+            self._shared_frame, text="Artwork center"
+        )
+        self._center_mode_label.grid(row=shared_row, column=0, sticky="w", pady=(10, 0))
+        shared_row += 1
+        self._center_mode = ctk.StringVar(value=CENTER_BOUNDS)
+        self._center_mode_btn = ctk.CTkSegmentedButton(
+            self._shared_frame,
+            values=[CENTER_BOUNDS, CENTER_CENTROID],
+            variable=self._center_mode,
+        )
+        self._center_mode_btn.grid(row=shared_row, column=0, sticky="ew", pady=4)
+        shared_row += 1
+        self._center_mode_hint = ctk.CTkLabel(
+            self._shared_frame,
+            text=(
+                "bounds: box center (seals / Corbett). "
+                "centroid: mass center (pointed shields)."
+            ),
+            wraplength=300,
+            justify="left",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        self._center_mode_hint.grid(row=shared_row, column=0, sticky="w", pady=2)
+        shared_row += 1
+
         self._mirror_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             self._shared_frame,
@@ -571,19 +614,32 @@ class StampDesignerApp(ctk.CTk):
     def _on_base_shape_changed(self, shape: str) -> None:
         diameter_frame = self._diameter.master
         stamp_width_frame = self._stamp_width.master
+        show_center = self._mode.get() == "image"
+        if show_center:
+            self._center_mode_label.grid()
+            self._center_mode_btn.grid()
+            self._center_mode_hint.grid()
+        else:
+            self._center_mode_label.grid_remove()
+            self._center_mode_btn.grid_remove()
+            self._center_mode_hint.grid_remove()
+
         if shape == BASE_SHAPE_ROUND:
             diameter_frame.grid()
+            self._back_tick_check.grid()
             self._shared_hint.configure(
                 text=(
                     "Round stamps use Stamp diameter as the total outer size. "
                     "Border margin is the edge inset. Image artwork is scaled to "
-                    "fit inside the circle. Mirror flips the design for leather."
+                    "fit inside the circle. Back tick marks the top on the stamp back. "
+                    "Mirror flips the design for leather."
                 )
             )
             if self._mode.get() == "image":
                 stamp_width_frame.grid_remove()
         else:
             diameter_frame.grid_remove()
+            self._back_tick_check.grid_remove()
             self._shared_hint.configure(
                 text=(
                     "Raised areas extrude upward from the stamp face. "
@@ -671,6 +727,7 @@ class StampDesignerApp(ctk.CTk):
             orientation=self._orientation.get(),
             base_shape=self._base_shape.get(),
             diameter_mm=self._slider_value(self._diameter),
+            back_tick=self._back_tick_var.get(),
         )
 
     def _collect_image_settings(self) -> ImageStampSettings:
@@ -700,6 +757,8 @@ class StampDesignerApp(ctk.CTk):
             border_width=self._slider_value(self._border_width),
             base_shape=base_shape,
             diameter_mm=diameter,
+            center_mode=self._center_mode.get(),
+            back_tick=self._back_tick_var.get(),
         )
 
     def _collect_mold_settings(self) -> ValetMoldSettings:
@@ -722,11 +781,24 @@ class StampDesignerApp(ctk.CTk):
             simplify=self._slider_value(self._mold_simplify),
         )
 
-    def _on_font_selected(self, _choice: str) -> None:
+    def _on_font_selected(self, choice: str) -> None:
         self._custom_font_path = None
         self._custom_font_label.configure(
             text="No custom font loaded", text_color="gray"
         )
+        # If the user typed a partial name, snap to the first matching font.
+        names = [f.display_name for f in self._fonts]
+        if choice in names:
+            return
+        needle = (choice or "").strip().lower()
+        if not needle:
+            return
+        match = next((n for n in names if n.lower().startswith(needle)), None)
+        if match is None:
+            match = next((n for n in names if needle in n.lower()), None)
+        if match is not None:
+            self._font_var.set(match)
+            self._font_menu.set(match)
 
     def _on_load_font(self) -> None:
         path = filedialog.askopenfilename(
@@ -910,6 +982,8 @@ class StampDesignerApp(ctk.CTk):
             border_width=self._slider_value(self._border_width),
             base_shape=self._base_shape.get(),
             diameter_mm=self._slider_value(self._diameter),
+            center_mode=self._center_mode.get(),
+            back_tick=self._back_tick_var.get(),
             mold_shape=self._mold_shape.get(),
 
             mold_length_mm=self._slider_value(self._mold_length),
@@ -1076,6 +1150,11 @@ class StampDesignerApp(ctk.CTk):
             base_shape = BASE_SHAPE_RECT
         self._base_shape.set(base_shape)
         self._set_slider(self._diameter, shared.get("diameter_mm", 40.0))
+        center_mode = shared.get("center_mode", CENTER_BOUNDS)
+        if center_mode not in (CENTER_BOUNDS, CENTER_CENTROID):
+            center_mode = CENTER_BOUNDS
+        self._center_mode.set(center_mode)
+        self._back_tick_var.set(bool(shared.get("back_tick", False)))
 
         self._text.delete("1.0", "end")
         self._text.insert("1.0", text.get("text") or "")
