@@ -30,7 +30,7 @@ class StampSettings:
     orientation: str = "horizontal"  # "horizontal" | "vertical"
     base_shape: str = BASE_SHAPE_RECT  # "rect" | "round"
     diameter_mm: float = 40.0  # total outer diameter when base_shape == "round"
-    back_tick: bool = False  # raised orientation mark on round stamp back (+Y)
+    back_tick: bool = False  # recessed orientation mark on round stamp back (+Y)
     # Stamp face at Z=0; letters extrude +Z; base extends -Z
 
 

@@ -61,7 +61,7 @@ Distribute either the whole `dist\STLBuilder` folder (portable) or the `STLBuild
 1. Choose **text** mode and enter your stamp text (use **Enter** for a second line).
 2. Pick **horizontal** or **vertical** text direction (vertical stacks each letter top-to-bottom).
 3. Pick a **font** and adjust **font size**, **imprint depth**, and **base thickness**.
-4. Choose **Base shape** `rect` or `round`. For round stamps, set **Stamp diameter** to the total outer size (mm); **Border margin** is the edge inset. Optionally enable **Back orientation tick** — a raised mark on the stamp back at the top edge so you can feel which way is up.
+4. Choose **Base shape** `rect` or `round`. For round stamps, set **Stamp diameter** to the total outer size (mm); **Border margin** is the edge inset. Optionally enable **Back orientation tick** — a recessed notch on the stamp back at the top edge so you can feel which way is up (prints flat, no supports).
 5. Leave **Mirror design** enabled so the stamped leather reads normally.
 6. Click **Update Preview**, then **Export STL…**.
 

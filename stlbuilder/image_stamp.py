@@ -53,7 +53,7 @@ class ImageStampSettings:
     diameter_mm: float = 40.0  # total outer diameter when round
     # "bounds" = bounding-box center (better for seals); "centroid" = mass center (shields).
     center_mode: str = CENTER_BOUNDS
-    back_tick: bool = False  # raised orientation mark on round stamp back (+Y)
+    back_tick: bool = False  # recessed orientation mark on round stamp back (+Y)
 
     # Soften pixel stair-steps on raster silhouettes before contouring (odd px, 0=off).
     edge_smooth_px: int = 3

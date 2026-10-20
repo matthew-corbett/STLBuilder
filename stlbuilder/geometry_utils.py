@@ -47,28 +47,31 @@ def _back_orientation_tick(
     *,
     tick_length_mm: float = 4.0,
     tick_width_mm: float = 2.5,
-    tick_height_mm: float = 1.2,
+    tick_depth_mm: float = 1.0,
     edge_inset_mm: float = 1.5,
 ) -> cq.Workplane:
-    """Raised tick on the stamp back (+Y) so you can feel which way is up.
+    """Recessed tick cutter for the stamp back (+Y) — which way is up by feel.
 
     Stamp face is at Z=0 (design +Z); base fills Z in [-base_thickness, 0].
-    The tick sits on the back face and protrudes further in -Z, near the +Y rim
-    (top of the design).
+    The cutter removes material from the back face upward (toward Z=0), near the
+    +Y rim, so the back stays flat on the bed and needs no supports.
     """
     radius = diameter_mm / 2.0
     length = min(tick_length_mm, max(2.0, radius * 0.35))
     width = min(tick_width_mm, max(1.5, radius * 0.2))
-    height = min(tick_height_mm, max(0.6, base_thickness * 0.35))
+    # Keep a solid floor so the recess never punches through the base.
+    max_depth = max(0.4, base_thickness - 0.8)
+    depth = min(tick_depth_mm, max(0.5, base_thickness * 0.35), max_depth)
     inset = max(0.8, edge_inset_mm)
     # Center of the tick, inset from the +Y rim toward the origin.
     y = radius - inset - length / 2.0
     if y < length / 2.0:
         y = length / 2.0
+    # Slightly oversized in -Z so the cut cleanly opens the back face.
     return (
         cq.Workplane("XY")
-        .box(width, length, height)
-        .translate((0.0, y, -base_thickness - height / 2.0))
+        .box(width, length, depth + 0.2)
+        .translate((0.0, y, -base_thickness + depth / 2.0 - 0.1))
     )
 
 
@@ -121,7 +124,7 @@ def build_stamp_base(
         )
         if back_tick:
             try:
-                base = base.union(
+                base = base.cut(
                     _back_orientation_tick(diameter, base_thickness)
                 )
             except Exception:

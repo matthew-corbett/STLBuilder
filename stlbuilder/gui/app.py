@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -158,16 +159,19 @@ class StampDesignerApp(ctk.CTk):
         font_names = [f.display_name for f in self._fonts]
         default_idx = font_names.index("Arial") if "Arial" in font_names else 0
         self._font_var = ctk.StringVar(value=font_names[default_idx])
-        # ComboBox dropdown scrolls with the mouse wheel; typing jumps to a name.
-        self._font_menu = ctk.CTkComboBox(
+        # Native CTk dropdowns (OptionMenu/ComboBox) cannot mouse-wheel scroll on
+        # Windows — open a searchable Listbox popup instead.
+        self._font_btn = ctk.CTkButton(
             self._text_frame,
-            variable=self._font_var,
-            values=font_names,
+            text=f"{font_names[default_idx]}  ▼",
             width=280,
-            command=self._on_font_selected,
-            state="normal",
+            anchor="w",
+            fg_color=("gray85", "gray25"),
+            text_color=("gray10", "gray90"),
+            hover_color=("gray75", "gray35"),
+            command=self._open_font_picker,
         )
-        self._font_menu.grid(row=text_row, column=0, sticky="ew", pady=4)
+        self._font_btn.grid(row=text_row, column=0, sticky="ew", pady=4)
         text_row += 1
 
         ctk.CTkButton(
@@ -495,7 +499,7 @@ class StampDesignerApp(ctk.CTk):
         self._back_tick_var = ctk.BooleanVar(value=False)
         self._back_tick_check = ctk.CTkCheckBox(
             self._shared_frame,
-            text="Back orientation tick (top)",
+            text="Back orientation tick (recessed, top)",
             variable=self._back_tick_var,
         )
         self._back_tick_check.grid(row=shared_row, column=0, sticky="w", pady=4)
@@ -631,7 +635,7 @@ class StampDesignerApp(ctk.CTk):
                 text=(
                     "Round stamps use Stamp diameter as the total outer size. "
                     "Border margin is the edge inset. Image artwork is scaled to "
-                    "fit inside the circle. Back tick marks the top on the stamp back. "
+                    "fit inside the circle. Recessed back tick marks the top (prints flat). "
                     "Mirror flips the design for leather."
                 )
             )
@@ -781,14 +785,19 @@ class StampDesignerApp(ctk.CTk):
             simplify=self._slider_value(self._mold_simplify),
         )
 
-    def _on_font_selected(self, choice: str) -> None:
+    def _set_font_choice(self, name: str) -> None:
+        """Update font selection UI and clear any custom .ttf override."""
+        self._font_var.set(name)
+        self._font_btn.configure(text=f"{name}  ▼")
         self._custom_font_path = None
         self._custom_font_label.configure(
             text="No custom font loaded", text_color="gray"
         )
-        # If the user typed a partial name, snap to the first matching font.
+
+    def _on_font_selected(self, choice: str) -> None:
         names = [f.display_name for f in self._fonts]
         if choice in names:
+            self._set_font_choice(choice)
             return
         needle = (choice or "").strip().lower()
         if not needle:
@@ -797,8 +806,150 @@ class StampDesignerApp(ctk.CTk):
         if match is None:
             match = next((n for n in names if needle in n.lower()), None)
         if match is not None:
-            self._font_var.set(match)
-            self._font_menu.set(match)
+            self._set_font_choice(match)
+
+    def _open_font_picker(self) -> None:
+        """Scrollable font list — mouse wheel works (unlike CTk Menu dropdowns)."""
+        names = [f.display_name for f in self._fonts]
+        current = self._font_var.get()
+
+        win = ctk.CTkToplevel(self)
+        win.title("Choose font")
+        win.geometry("380x460")
+        win.transient(self)
+        win.grab_set()
+        win.focus_force()
+
+        ctk.CTkLabel(win, text="Search").pack(anchor="w", padx=12, pady=(12, 0))
+        search_var = tk.StringVar()
+        search = ctk.CTkEntry(win, textvariable=search_var, width=340)
+        search.pack(fill="x", padx=12, pady=6)
+
+        # Plain tk.Frame so wheel events reach a real Tk widget (CTkFrame often
+        # swallows MouseWheel on Windows).
+        list_frame = tk.Frame(win, bg="#2b2b2b")
+        list_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+        listbox = tk.Listbox(
+            list_frame,
+            yscrollcommand=scrollbar.set,
+            font=("Segoe UI", 11),
+            activestyle="dotbox",
+            exportselection=False,
+            highlightthickness=0,
+            borderwidth=0,
+            bg="#2b2b2b",
+            fg="#f0f0f0",
+            selectbackground="#1f6aa5",
+            selectforeground="#ffffff",
+        )
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        def populate(filter_text: str = "") -> None:
+            needle = filter_text.strip().lower()
+            listbox.delete(0, tk.END)
+            for name in names:
+                if not needle or needle in name.lower():
+                    listbox.insert(tk.END, name)
+            # Reselect current if still visible.
+            try:
+                items = listbox.get(0, tk.END)
+                if current in items:
+                    idx = items.index(current)
+                    listbox.selection_set(idx)
+                    listbox.activate(idx)
+                    listbox.see(idx)
+                elif listbox.size() > 0:
+                    listbox.selection_set(0)
+                    listbox.activate(0)
+            except Exception:
+                pass
+
+        def on_mousewheel(event: tk.Event) -> str:
+            # Only handle wheels while the pointer is over this dialog.
+            try:
+                if not win.winfo_exists():
+                    return "break"
+                under = win.winfo_containing(event.x_root, event.y_root)
+                if under is None:
+                    return "break"
+                if under.winfo_toplevel() is not win.winfo_toplevel():
+                    return "break"
+            except tk.TclError:
+                return "break"
+
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                return "break"
+            # Notch mice report ±120; precision pads send smaller deltas.
+            if abs(delta) >= 120:
+                steps = int(-delta / 120)
+            else:
+                steps = -1 if delta > 0 else 1
+            listbox.yview_scroll(steps, "units")
+            return "break"
+
+        def bind_wheel(_event: object | None = None) -> None:
+            win.bind_all("<MouseWheel>", on_mousewheel)
+
+        def unbind_wheel(_event: object | None = None) -> None:
+            try:
+                win.unbind_all("<MouseWheel>")
+            except tk.TclError:
+                pass
+
+        def close_picker() -> None:
+            unbind_wheel()
+            try:
+                win.grab_release()
+            except tk.TclError:
+                pass
+            win.destroy()
+
+        def apply_selection(_event: object | None = None) -> None:
+            sel = listbox.curselection()
+            if not sel:
+                return
+            choice = listbox.get(sel[0])
+            self._set_font_choice(choice)
+            close_picker()
+
+        def on_search(*_args: object) -> None:
+            populate(search_var.get())
+
+        search_var.trace_add("write", on_search)
+        listbox.bind("<Double-Button-1>", apply_selection)
+        listbox.bind("<Return>", apply_selection)
+        search.bind("<Return>", apply_selection)
+        win.bind("<Escape>", lambda _e: close_picker())
+        win.protocol("WM_DELETE_WINDOW", close_picker)
+
+        # bind_all is required on Windows — Listbox alone often never sees wheel
+        # events under CTkToplevel + grab_set.
+        bind_wheel()
+        listbox.bind("<Enter>", bind_wheel)
+        scrollbar.bind("<Enter>", bind_wheel)
+        list_frame.bind("<Enter>", bind_wheel)
+        listbox.bind("<MouseWheel>", on_mousewheel)
+        scrollbar.bind("<MouseWheel>", on_mousewheel)
+        list_frame.bind("<MouseWheel>", on_mousewheel)
+        win.bind("<Destroy>", lambda e: unbind_wheel() if e.widget is win else None)
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(0, 12))
+        ctk.CTkButton(btn_row, text="Cancel", width=100, command=close_picker).pack(
+            side="right", padx=(6, 0)
+        )
+        ctk.CTkButton(btn_row, text="Select", width=100, command=apply_selection).pack(
+            side="right"
+        )
+
+        populate("")
+        # Focus the list so the first wheel tick scrolls it (not the search entry).
+        listbox.focus_set()
 
     def _on_load_font(self) -> None:
         path = filedialog.askopenfilename(
@@ -1069,9 +1220,13 @@ class StampDesignerApp(ctk.CTk):
                         ),
                     )
                 except StampGenerationError as exc:
-                    self.after(0, lambda: self._on_error(str(exc)))
+                    # Bind eagerly: Python deletes `exc` when the except block exits,
+                    # so a plain lambda would raise NameError when Tk runs it later.
+                    msg = str(exc)
+                    self.after(0, lambda msg=msg: self._on_error(msg))
                 except Exception as exc:
-                    self.after(0, lambda: self._on_error(f"Could not save draft: {exc}"))
+                    msg = f"Could not save draft: {exc}"
+                    self.after(0, lambda msg=msg: self._on_error(msg))
 
             threading.Thread(target=work_build_then_save, daemon=True).start()
             return
@@ -1095,7 +1250,8 @@ class StampDesignerApp(ctk.CTk):
                     ),
                 )
             except Exception as exc:
-                self.after(0, lambda: self._on_error(f"Could not save draft: {exc}"))
+                msg = f"Could not save draft: {exc}"
+                self.after(0, lambda msg=msg: self._on_error(msg))
 
         threading.Thread(target=work_save, daemon=True).start()
 
@@ -1174,6 +1330,7 @@ class StampDesignerApp(ctk.CTk):
             font_names = [f.display_name for f in self._fonts]
             if family in font_names:
                 self._font_var.set(family)
+                self._font_btn.configure(text=f"{family}  ▼")
 
         self._set_slider(self._font_size, text.get("font_size", 12.0))
         orientation = text.get("orientation", "horizontal")
@@ -1372,9 +1529,13 @@ class StampDesignerApp(ctk.CTk):
                     ),
                 )
             except StampGenerationError as exc:
-                self.after(0, lambda: self._on_error(str(exc)))
+                # Bind eagerly: Python deletes `exc` when the except block exits,
+                # so a plain lambda would raise NameError when Tk runs it later.
+                msg = str(exc)
+                self.after(0, lambda msg=msg: self._on_error(msg))
             except Exception as exc:
-                self.after(0, lambda: self._on_error(f"Unexpected error: {exc}"))
+                msg = f"Unexpected error: {exc}"
+                self.after(0, lambda msg=msg: self._on_error(msg))
 
         threading.Thread(target=work, daemon=True).start()
 
